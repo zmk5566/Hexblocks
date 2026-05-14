@@ -1,0 +1,5 @@
+websockets
+pyserial
+requests
+bleak>=0.21
+python-osc>=1.8

@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WearBlocks Companion</title>
+  <link rel="stylesheet" href="css/theme.css">
+  <!-- Theme controller: must run before component modules so data-theme is set before first render -->
+  <script src="js/theme-controller.js"></script>
+  <!-- Blockly visual programming (loaded as classic scripts so the global Blockly is available to wb-block-canvas) -->
+  <script src="https://unpkg.com/blockly/blockly_compressed.js"></script>
+  <script src="https://unpkg.com/blockly/msg/en.js"></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "lit": "https://cdn.jsdelivr.net/npm/lit@3/+esm",
+        "lit/": "https://cdn.jsdelivr.net/npm/lit@3/",
+        "lit/decorators.js": "https://cdn.jsdelivr.net/npm/lit@3/decorators.js?module"
+      }
+    }
+  </script>
+  <script type="module" src="js/components/wb-app.js"></script>
+</head>
+<body>
+  <wb-app></wb-app>
+</body>
+</html>

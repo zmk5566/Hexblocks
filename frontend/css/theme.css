@@ -1,0 +1,126 @@
+/* WearBlocks Theme — Light default + Dark override */
+:root {
+  /* Module category colors (from paper) — preserved across themes */
+  --wb-motion:      #7CA1BB;  /* Slate — IMU, Accel */
+  --wb-biometric:   #7B68EE;  /* Purple — HR, SpO2 */
+  --wb-environment: #C1B496;  /* Tan — Light Sensor */
+  --wb-haptic:      #50C878;  /* Green — Vibration */
+  --wb-visual:      #C68E9E;  /* Rose — LED */
+  --wb-comm:        #FFD700;  /* Gold — BLE, NFC */
+  --wb-hub:         #989898;  /* Gray — Hub */
+  --wb-speaker:     #9885BF;  /* Purple — Speaker / Audio */
+  --wb-knob:        #98AF6F;  /* Olive — Knob / Rotary */
+
+  /* Surface & text — LIGHT defaults */
+  --wb-bg:          #ffffff;
+  --wb-surface:     #f7f8fa;
+  --wb-surface-2:   #eef1f6;
+  --wb-text:        #1a1a2e;
+  --wb-text-dim:    #5b6478;
+  --wb-accent:      #0a8f7a;
+  --wb-border:      #d6dbe4;
+  --wb-danger:      #c0392b;
+
+  /* Topology / chart auxiliary tokens */
+  --wb-mod-hover:        #dde3ed;
+  --wb-edge-stroke:      rgba(0, 0, 0, 0.22);
+  --wb-bg-grid-stroke:   rgba(0, 0, 0, 0.06);
+  --wb-cap-badge-bg:     rgba(10, 143, 122, 0.12);
+  --wb-face-badge-bg:    #e8edf5;
+  --wb-face-badge-stroke: rgba(0, 0, 0, 0.12);
+  --wb-ghost-stroke:     rgba(0, 0, 0, 0.18);
+  --wb-ghost-label:      rgba(0, 0, 0, 0.35);
+  --wb-on-accent:        #ffffff;
+  --wb-json-bg:          #f7f8fa;
+  --wb-json-bg-focus:    #eef1f6;
+  --wb-json-text:        #1a1a2e;
+  --wb-blockly-ws-bg:    #ffffff;
+  --wb-blockly-tb-bg:    #f4f6fa;
+  --wb-blockly-tb-fg:    #1a1a2e;
+  --wb-blockly-scroll:   #cdd3de;
+  --wb-blockly-block-text: #1a1a2e;
+  --wb-blockly-field-bg: rgba(255, 255, 255, 0.9);
+  --wb-blockly-field-text: #111827;
+  --wb-blockly-field-border: rgba(0, 0, 0, 0.18);
+
+  /* Square corners by default — circular badges keep 50% inline */
+  --wb-radius-sm:   0;
+  --wb-radius-md:   0;
+  --wb-radius-lg:   0;
+  --wb-radius-pill: 0;
+
+  /* Typography */
+  --wb-font: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+             Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  --wb-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
+}
+
+/* Dark theme override */
+:root[data-theme="dark"] {
+  --wb-bg:          #1a1a2e;
+  --wb-surface:     #16213e;
+  --wb-surface-2:   #0f3460;
+  --wb-text:        #e8e8e8;
+  --wb-text-dim:    #8892b0;
+  --wb-accent:      #64ffda;
+  --wb-border:      #2d3a5a;
+  --wb-danger:      #ff6b6b;
+
+  --wb-mod-hover:        #1a2d4a;
+  --wb-edge-stroke:      rgba(255, 255, 255, 0.18);
+  --wb-bg-grid-stroke:   rgba(255, 255, 255, 0.04);
+  --wb-cap-badge-bg:     rgba(100, 255, 218, 0.15);
+  --wb-face-badge-bg:    #1a2d50;
+  --wb-face-badge-stroke: rgba(255, 255, 255, 0.15);
+  --wb-ghost-stroke:     rgba(255, 255, 255, 0.15);
+  --wb-ghost-label:      rgba(255, 255, 255, 0.3);
+  --wb-on-accent:        #000000;
+  --wb-json-bg:          #0a1628;
+  --wb-json-bg-focus:    #0d1b2e;
+  --wb-json-text:        #e8f4ff;
+  --wb-blockly-ws-bg:    #0a1628;
+  --wb-blockly-tb-bg:    #0d1b2e;
+  --wb-blockly-tb-fg:    #e8f4ff;
+  --wb-blockly-scroll:   #1a2d4a;
+  --wb-blockly-block-text: #f8fbff;
+  --wb-blockly-field-bg: rgba(10, 22, 40, 0.72);
+  --wb-blockly-field-text: #f8fbff;
+  --wb-blockly-field-border: rgba(255, 255, 255, 0.24);
+
+}
+
+/* Global reset */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  font-family: var(--wb-font);
+  background: var(--wb-bg);
+  color: var(--wb-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--wb-border);
+  border-radius: 0;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--wb-text-dim);
+}

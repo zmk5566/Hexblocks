@@ -1,0 +1,43 @@
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Local environment
+.env
+frontend/bridge/.env
+
+# Local runtime state
+tmp/
+frontend/bridge/paired_devices.json
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# KiCad local history
+schematics/.history/
+
+# LaTeX artifacts, in case examples or docs later include TeX
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+texput.log
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+*.toc
+*.lof
+*.lot
+*.idx
+*.ind
+*.ilg
+*.nav
+*.snm
+*.vrb
