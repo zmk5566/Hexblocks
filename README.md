@@ -167,8 +167,8 @@ works for the bridge-mediated path.
 
 ```bibtex
 @misc{hexblocks2026,
-  title         = {HexBlocks: Semantic Continuity for Live Authoring of
-                   Reconfigurable Physical Interfaces},
+  title         = {HexBlocks: Open-Source Prototyping of
+                   Reconfigurable Physical Interfaces with Semantic Continuity},
   author        = {Ma, Zhengyang and Wang, Xuetong},
   year          = {2026},
   eprint        = {to appear},
