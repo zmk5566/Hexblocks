@@ -1,4 +1,4 @@
-# HexBlocks
+<h1 align="center">HexBlocks</h1>
 
 <p align="center">
   <img src="https://zmk5566.github.io/Hexblocks/pics/ending-pic.jpg" alt="HexBlocks modules arranged for a live prototype" width="320">
