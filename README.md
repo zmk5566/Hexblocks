@@ -12,6 +12,12 @@ The core idea is semantic continuity. Physical modules, authoring references, an
 
 The reference implementation uses hex-shaped magnetic sensor and actuator blocks connected through a battery-powered hub. It supports hub-resident Event-Condition-Action execution for standalone prototypes, and sensor-stream integration for browser tools and OSC-based creative-coding environments.
 
+## Interface
+
+<p align="center">
+  <img src="https://zmk5566.github.io/Hexblocks/pics/introduction-to-sections/8.png" alt="HexBlocks interface" width="720">
+</p>
+
 ## Links
 
 - Video walkthrough: <https://zmk5566.github.io/Hexblocks/>
