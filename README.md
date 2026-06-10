@@ -5,6 +5,10 @@
 </p>
 
 <p align="center">
+  <a href="https://zmk5566.github.io/Hexblocks/">Walkthrough</a>
+</p>
+
+<p align="center">
   <img src="https://zmk5566.github.io/Hexblocks/pics/ending-pic.jpg" alt="HexBlocks modules arranged for a live prototype" width="320">
 </p>
 
