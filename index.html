@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HexBlocks Presentation</title>
+<link rel="stylesheet" href="hexblocks-presentation.css">
+</head>
+<body>
+<div class="stage" id="stage">
+  <div class="deck">
+    <div class="progress" aria-hidden="true">
+      <div class="progress-bar" id="prog"></div>
+    </div>
+
+    <div class="slides" id="slides" aria-live="polite"></div>
+    <div class="subtitle-box" id="subtitle" aria-live="polite" aria-hidden="true"></div>
+
+    <div class="nav" id="nav" aria-label="Slide navigation" data-nav-control>
+      <button class="nav-toggle" id="nav-toggle" type="button" aria-expanded="false" aria-controls="nav-dock" title="Show controls">
+        <span class="nav-toggle-counter" id="nav-toggle-counter">01 / 01</span>
+        <span class="nav-toggle-mark" aria-hidden="true"></span>
+      </button>
+      <div class="nav-dock" id="nav-dock" aria-hidden="true">
+        <div class="nav-primary">
+          <button id="prev" type="button">Prev</button>
+          <span class="counter" id="ctr">01 / 01</span>
+          <button id="next" type="button">Next</button>
+        </div>
+        <div class="playback-controls">
+          <button id="auto" type="button" aria-pressed="false">Auto</button>
+          <label class="audio-toggle">
+            <input id="narration-audio" type="checkbox" checked>
+            <span>Audio</span>
+          </label>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="hexblocks-presentation-data.js"></script>
+<script src="hexblocks-scenes.js"></script>
+<script src="hexblocks-presentation.js"></script>
+</body>
+</html>

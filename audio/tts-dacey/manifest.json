@@ -1,0 +1,946 @@
+{
+  "generatedAt": "2026-06-04T10:47:53.365Z",
+  "renderedAt": "2026-06-05T08:43:19Z",
+  "voice": "en_female_dacey_uranus_bigtts",
+  "format": "mp3",
+  "sampleRate": 24000,
+  "speechRate": 30,
+  "speed": 1.3,
+  "source": "video/light-theremin-walkthrough/hexblocks-presentation-data.js",
+  "count": 48,
+  "entries": [
+    {
+      "id": "01-title-narration-01",
+      "file": "01-title-narration-01.mp3",
+      "type": "narration",
+      "slideIndex": 0,
+      "slideNo": 1,
+      "slideSlug": "title",
+      "cueIndex": 0,
+      "durationMs": 9000,
+      "text": "In this video, we present HexBlocks, an open-source software-hardware framework for no-compile prototyping of reconfigurable physical interfaces."
+    },
+    {
+      "id": "02-llm-era-prototyping-narration-01",
+      "file": "02-llm-era-prototyping-narration-01.mp3",
+      "type": "narration",
+      "slideIndex": 1,
+      "slideNo": 2,
+      "slideSlug": "llm-era-prototyping",
+      "cueIndex": 0,
+      "durationMs": 5200,
+      "text": "Large language models are changing how people prototype interactive hardware."
+    },
+    {
+      "id": "02-llm-era-prototyping-narration-02",
+      "file": "02-llm-era-prototyping-narration-02.mp3",
+      "type": "narration",
+      "slideIndex": 1,
+      "slideNo": 2,
+      "slideSlug": "llm-era-prototyping",
+      "cueIndex": 1,
+      "durationMs": 7600,
+      "text": "With LLMs, a prototype can begin as a conversation about what the interaction should do, rather than as a firmware-writing task."
+    },
+    {
+      "id": "02-llm-era-prototyping-narration-03",
+      "file": "02-llm-era-prototyping-narration-03.mp3",
+      "type": "narration",
+      "slideIndex": 1,
+      "slideNo": 2,
+      "slideSlug": "llm-era-prototyping",
+      "cueIndex": 2,
+      "durationMs": 6800,
+      "text": "The first opportunity is that users can describe intent before committing to wiring diagrams or firmware templates."
+    },
+    {
+      "id": "02-llm-era-prototyping-narration-04",
+      "file": "02-llm-era-prototyping-narration-04.mp3",
+      "type": "narration",
+      "slideIndex": 1,
+      "slideNo": 2,
+      "slideSlug": "llm-era-prototyping",
+      "cueIndex": 3,
+      "durationMs": 7800,
+      "text": "The model can then suggest modules and draft behavior from natural-language prompts, making the first prototype easier to start."
+    },
+    {
+      "id": "02-llm-era-prototyping-narration-05",
+      "file": "02-llm-era-prototyping-narration-05.mp3",
+      "type": "narration",
+      "slideIndex": 1,
+      "slideNo": 2,
+      "slideSlug": "llm-era-prototyping",
+      "cueIndex": 4,
+      "durationMs": 7600,
+      "text": "This brings designers, educators, and domain experts into early hardware sketching, even when they do not write firmware."
+    },
+    {
+      "id": "03-llm-hardware-breakdown-narration-01",
+      "file": "03-llm-hardware-breakdown-narration-01.mp3",
+      "type": "narration",
+      "slideIndex": 2,
+      "slideNo": 3,
+      "slideSlug": "llm-hardware-breakdown",
+      "cueIndex": 0,
+      "durationMs": 5600,
+      "text": "But once LLMs help generate behavior for physical prototypes, a new problem appears."
+    },
+    {
+      "id": "03-llm-hardware-breakdown-narration-02",
+      "file": "03-llm-hardware-breakdown-narration-02.mp3",
+      "type": "narration",
+      "slideIndex": 2,
+      "slideNo": 3,
+      "slideSlug": "llm-hardware-breakdown",
+      "cueIndex": 1,
+      "durationMs": 6800,
+      "text": "The generated behavior must stay grounded in the real modules, channels, and attachment state of the assembly."
+    },
+    {
+      "id": "03-llm-hardware-breakdown-narration-03",
+      "file": "03-llm-hardware-breakdown-narration-03.mp3",
+      "type": "narration",
+      "slideIndex": 2,
+      "slideNo": 3,
+      "slideSlug": "llm-hardware-breakdown",
+      "cueIndex": 2,
+      "durationMs": 9200,
+      "text": "Imagine a non-technical user who wants to build a safety night-light wristband. She can describe the goal, but choosing the right sensors and feedback modules is still an unfamiliar hardware search."
+    },
+    {
+      "id": "03-llm-hardware-breakdown-narration-04",
+      "file": "03-llm-hardware-breakdown-narration-04.mp3",
+      "type": "narration",
+      "slideIndex": 2,
+      "slideNo": 3,
+      "slideSlug": "llm-hardware-breakdown",
+      "cueIndex": 3,
+      "durationMs": 9000,
+      "text": "After behavior is generated, the wristband may still fail in ways that are hard to locate: the rule, the wiring, the module capability, or the generated assumption may be wrong."
+    },
+    {
+      "id": "03-llm-hardware-breakdown-narration-05",
+      "file": "03-llm-hardware-breakdown-narration-05.mp3",
+      "type": "narration",
+      "slideIndex": 2,
+      "slideNo": 3,
+      "slideSlug": "llm-hardware-breakdown",
+      "cueIndex": 4,
+      "durationMs": 9200,
+      "text": "As she moves modules or swaps feedback hardware, the authored behavior can lose contact with the physical module it was written for, forcing re-prompting, repair, or redeployment work."
+    },
+    {
+      "id": "04-related-work-narration-01",
+      "file": "04-related-work-narration-01.mp3",
+      "type": "narration",
+      "slideIndex": 3,
+      "slideNo": 4,
+      "slideSlug": "related-work",
+      "cueIndex": 0,
+      "durationMs": 9000,
+      "text": "Prior work makes parts of this process easier: construction kits support assembly, block-based authoring environments support inspection, and LLM systems support intent-to-code generation."
+    },
+    {
+      "id": "04-related-work-narration-02",
+      "file": "04-related-work-narration-02.mp3",
+      "type": "narration",
+      "slideIndex": 3,
+      "slideNo": 4,
+      "slideSlug": "related-work",
+      "cueIndex": 1,
+      "durationMs": 9000,
+      "text": "But these systems usually assume a fixed hardware model, so the connection between changing modules, generated behavior, and deployed runtime still has to be maintained by the user."
+    },
+    {
+      "id": "05-hexblocks-overview-narration-01",
+      "file": "05-hexblocks-overview-narration-01.mp3",
+      "type": "narration",
+      "slideIndex": 4,
+      "slideNo": 5,
+      "slideSlug": "hexblocks-overview",
+      "cueIndex": 0,
+      "durationMs": 7000,
+      "text": "HexBlocks addresses this gap by bringing module assembly, topology, behavior authoring, LLM assistance, and live data inspection into one workspace."
+    },
+    {
+      "id": "05-hexblocks-overview-narration-02",
+      "file": "05-hexblocks-overview-narration-02.mp3",
+      "type": "narration",
+      "slideIndex": 4,
+      "slideNo": 5,
+      "slideSlug": "hexblocks-overview",
+      "cueIndex": 1,
+      "durationMs": 7600,
+      "text": "This gives HexBlocks its central property, semantic continuity: the system treats a module as the same entity across assembly, authoring, inspection, and deployment."
+    },
+    {
+      "id": "05-hexblocks-overview-narration-03",
+      "file": "05-hexblocks-overview-narration-03.mp3",
+      "type": "narration",
+      "slideIndex": 4,
+      "slideNo": 5,
+      "slideSlug": "hexblocks-overview",
+      "cueIndex": 2,
+      "durationMs": 5200,
+      "text": "The next clip walks through how these views work together in the prototype."
+    },
+    {
+      "id": "06-system-overview-video-video-01",
+      "file": "06-system-overview-video-video-01.mp3",
+      "type": "videoCaption",
+      "slideIndex": 5,
+      "slideNo": 6,
+      "slideSlug": "system-overview-video",
+      "cueIndex": 0,
+      "durationMs": 2933,
+      "text": "A central hub supplies power and carries data for the connected modules.",
+      "start": 0.3
+    },
+    {
+      "id": "06-system-overview-video-video-02",
+      "file": "06-system-overview-video-video-02.mp3",
+      "type": "videoCaption",
+      "slideIndex": 5,
+      "slideNo": 6,
+      "slideSlug": "system-overview-video",
+      "cueIndex": 1,
+      "durationMs": 3067,
+      "text": "Modules magnetically snap onto the hub, and the live module list and visualized topology panel update with the physical assembly.",
+      "start": 4.5
+    },
+    {
+      "id": "06-system-overview-video-video-03",
+      "file": "06-system-overview-video-video-03.mp3",
+      "type": "videoCaption",
+      "slideIndex": 5,
+      "slideNo": 6,
+      "slideSlug": "system-overview-video",
+      "cueIndex": 2,
+      "durationMs": 2400,
+      "text": "This digital view precisely reflects the snapped physical configuration.",
+      "start": 10.9
+    },
+    {
+      "id": "06-system-overview-video-video-04",
+      "file": "06-system-overview-video-video-04.mp3",
+      "type": "videoCaption",
+      "slideIndex": 5,
+      "slideNo": 6,
+      "slideSlug": "system-overview-video",
+      "cueIndex": 3,
+      "durationMs": 6100,
+      "text": "The interface also visualizes live data from one or multiple sensors.",
+      "start": 14.55
+    },
+    {
+      "id": "06-system-overview-video-video-05",
+      "file": "06-system-overview-video-video-05.mp3",
+      "type": "videoCaption",
+      "slideIndex": 5,
+      "slideNo": 6,
+      "slideSlug": "system-overview-video",
+      "cueIndex": 4,
+      "durationMs": 3333,
+      "text": "Beyond hub-to-module attachment, a module can also become the parent for another module.",
+      "start": 25.5
+    },
+    {
+      "id": "06-system-overview-video-video-06",
+      "file": "06-system-overview-video-video-06.mp3",
+      "type": "videoCaption",
+      "slideIndex": 5,
+      "slideNo": 6,
+      "slideSlug": "system-overview-video",
+      "cueIndex": 5,
+      "durationMs": 3333,
+      "text": "This lets the physical topology extend into a three-layer arrangement in the reference design.",
+      "start": 33.41
+    },
+    {
+      "id": "06-system-overview-video-video-07",
+      "file": "06-system-overview-video-video-07.mp3",
+      "type": "videoCaption",
+      "slideIndex": 5,
+      "slideNo": 6,
+      "slideSlug": "system-overview-video",
+      "cueIndex": 6,
+      "durationMs": 3000,
+      "text": "Even as the topology changes, sensor data continues to arrive through the same module identity.",
+      "start": 38.7
+    },
+    {
+      "id": "07-semantic-continuity-narration-01",
+      "file": "07-semantic-continuity-narration-01.mp3",
+      "type": "narration",
+      "slideIndex": 6,
+      "slideNo": 7,
+      "slideSlug": "semantic-continuity",
+      "cueIndex": 0,
+      "durationMs": 7600,
+      "text": "The clip shows what semantic continuity provides: the same module identity stays valid across assembly, inspection, authoring, and deployment."
+    },
+    {
+      "id": "07-semantic-continuity-narration-02",
+      "file": "07-semantic-continuity-narration-02.mp3",
+      "type": "narration",
+      "slideIndex": 6,
+      "slideNo": 7,
+      "slideSlug": "semantic-continuity",
+      "cueIndex": 1,
+      "durationMs": 4600,
+      "text": "The concept that holds these parts together is semantic continuity."
+    },
+    {
+      "id": "07-semantic-continuity-narration-03",
+      "file": "07-semantic-continuity-narration-03.mp3",
+      "type": "narration",
+      "slideIndex": 6,
+      "slideNo": 7,
+      "slideSlug": "semantic-continuity",
+      "cueIndex": 2,
+      "durationMs": 3600,
+      "text": "We describe it through three forms of continuity."
+    },
+    {
+      "id": "07-semantic-continuity-narration-04",
+      "file": "07-semantic-continuity-narration-04.mp3",
+      "type": "narration",
+      "slideIndex": 6,
+      "slideNo": 7,
+      "slideSlug": "semantic-continuity",
+      "cueIndex": 3,
+      "durationMs": 5200,
+      "text": "Configuration continuity keeps module identity stable as users attach, swap, or stack modules."
+    },
+    {
+      "id": "07-semantic-continuity-narration-05",
+      "file": "07-semantic-continuity-narration-05.mp3",
+      "type": "narration",
+      "slideIndex": 6,
+      "slideNo": 7,
+      "slideSlug": "semantic-continuity",
+      "cueIndex": 4,
+      "durationMs": 5400,
+      "text": "Authoring continuity keeps LLM and Blockly references grounded in the live schema, rather than in a static device list."
+    },
+    {
+      "id": "07-semantic-continuity-narration-06",
+      "file": "07-semantic-continuity-narration-06.mp3",
+      "type": "narration",
+      "slideIndex": 6,
+      "slideNo": 7,
+      "slideSlug": "semantic-continuity",
+      "cueIndex": 5,
+      "durationMs": 5400,
+      "text": "Deployment continuity keeps the accepted ECA program targeting the same UID-keyed modules at runtime."
+    },
+    {
+      "id": "07-semantic-continuity-narration-07",
+      "file": "07-semantic-continuity-narration-07.mp3",
+      "type": "narration",
+      "slideIndex": 6,
+      "slideNo": 7,
+      "slideSlug": "semantic-continuity",
+      "cueIndex": 6,
+      "durationMs": 5600,
+      "text": "Together, these continuities connect the physical prototype, the authoring interface, and the deployed behavior."
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-01",
+      "file": "08-light-theremin-walkthrough-video-video-01.mp3",
+      "type": "videoCaption",
+      "slideIndex": 7,
+      "slideNo": 8,
+      "slideSlug": "light-theremin-walkthrough-video",
+      "cueIndex": 0,
+      "durationMs": 3800,
+      "text": "This walkthrough uses a light theremin as a running example.",
+      "start": 0
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-02",
+      "file": "08-light-theremin-walkthrough-video-video-02.mp3",
+      "type": "videoCaption",
+      "slideIndex": 7,
+      "slideNo": 8,
+      "slideSlug": "light-theremin-walkthrough-video",
+      "cueIndex": 1,
+      "durationMs": 4200,
+      "text": "The user first asks the LLM what modules are needed to build that interaction.",
+      "start": 3.8
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-03",
+      "file": "08-light-theremin-walkthrough-video-video-03.mp3",
+      "type": "videoCaption",
+      "slideIndex": 7,
+      "slideNo": 8,
+      "slideSlug": "light-theremin-walkthrough-video",
+      "cueIndex": 2,
+      "durationMs": 4700,
+      "text": "Following the recommendation, the user attaches the suggested modules to the hub.",
+      "start": 8
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-04",
+      "file": "08-light-theremin-walkthrough-video-video-04.mp3",
+      "type": "videoCaption",
+      "slideIndex": 7,
+      "slideNo": 8,
+      "slideSlug": "light-theremin-walkthrough-video",
+      "cueIndex": 3,
+      "durationMs": 5000,
+      "text": "As those modules appear in the live schema, the user can ask the LLM to author behavior for the current assembly.",
+      "start": 13
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-05",
+      "file": "08-light-theremin-walkthrough-video-video-05.mp3",
+      "type": "videoCaption",
+      "slideIndex": 7,
+      "slideNo": 8,
+      "slideSlug": "light-theremin-walkthrough-video",
+      "cueIndex": 4,
+      "durationMs": 6000,
+      "text": "The generated ECA rules are not hidden code: the user can accept, reject, or revise them as editable Blockly blocks.",
+      "start": 19
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-06",
+      "file": "08-light-theremin-walkthrough-video-video-06.mp3",
+      "type": "videoCaption",
+      "slideIndex": 7,
+      "slideNo": 8,
+      "slideSlug": "light-theremin-walkthrough-video",
+      "cueIndex": 5,
+      "durationMs": 6500,
+      "text": "This block form makes the behavior inspectable and steerable, while the sensor visualization panel shows the system starting to run.",
+      "start": 26
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-07",
+      "file": "08-light-theremin-walkthrough-video-video-07.mp3",
+      "type": "videoCaption",
+      "slideIndex": 7,
+      "slideNo": 8,
+      "slideSlug": "light-theremin-walkthrough-video",
+      "cueIndex": 6,
+      "durationMs": 7000,
+      "text": "When the user adds another module, module awareness lets the LLM update the program against the new live schema.",
+      "start": 33
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-08",
+      "file": "08-light-theremin-walkthrough-video-video-08.mp3",
+      "type": "videoCaption",
+      "slideIndex": 7,
+      "slideNo": 8,
+      "slideSlug": "light-theremin-walkthrough-video",
+      "cueIndex": 7,
+      "durationMs": 8000,
+      "text": "The user intent can change from a simple light theremin to a richer mapping without rebuilding the hardware model from scratch.",
+      "start": 42
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-09",
+      "file": "08-light-theremin-walkthrough-video-video-09.mp3",
+      "type": "videoCaption",
+      "slideIndex": 7,
+      "slideNo": 8,
+      "slideSlug": "light-theremin-walkthrough-video",
+      "cueIndex": 8,
+      "durationMs": 5200,
+      "text": "Returning to semantic continuity, the user can move modules while the deployed behavior keeps working.",
+      "start": 60
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-10",
+      "file": "08-light-theremin-walkthrough-video-video-10.mp3",
+      "type": "videoCaption",
+      "slideIndex": 7,
+      "slideNo": 8,
+      "slideSlug": "light-theremin-walkthrough-video",
+      "cueIndex": 9,
+      "durationMs": 6400,
+      "text": "Because the ECA program is UID-keyed and persisted on the hub, it can resume after power cycling.",
+      "start": 65.8
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-11",
+      "file": "08-light-theremin-walkthrough-video-video-11.mp3",
+      "type": "videoCaption",
+      "slideIndex": 7,
+      "slideNo": 8,
+      "slideSlug": "light-theremin-walkthrough-video",
+      "cueIndex": 10,
+      "durationMs": 6500,
+      "text": "Programs can also be exported and imported, avoiding an Arduino-style compile-and-flash cycle and speeding iteration.",
+      "start": 72.5
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-12",
+      "file": "08-light-theremin-walkthrough-video-video-12.mp3",
+      "type": "videoCaption",
+      "slideIndex": 7,
+      "slideNo": 8,
+      "slideSlug": "light-theremin-walkthrough-video",
+      "cueIndex": 11,
+      "durationMs": 5200,
+      "text": "Adding more modules lets the same workflow scale toward more complex interactive systems.",
+      "start": 80
+    },
+    {
+      "id": "09-operating-modes-narration-01",
+      "file": "09-operating-modes-narration-01.mp3",
+      "type": "narration",
+      "slideIndex": 8,
+      "slideNo": 9,
+      "slideSlug": "operating-modes",
+      "cueIndex": 0,
+      "durationMs": 5600,
+      "text": "The walkthrough we just saw is a standalone example: the accepted ECA behavior runs directly on the hub."
+    },
+    {
+      "id": "09-operating-modes-narration-02",
+      "file": "09-operating-modes-narration-02.mp3",
+      "type": "narration",
+      "slideIndex": 8,
+      "slideNo": 9,
+      "slideSlug": "operating-modes",
+      "cueIndex": 1,
+      "durationMs": 9400,
+      "text": "This is Mode A, hub-resident execution: the UI is used to author and update rules, but once accepted, the behavior runs on the hub without a companion computer or external device in the rule loop."
+    },
+    {
+      "id": "09-operating-modes-narration-03",
+      "file": "09-operating-modes-narration-03.mp3",
+      "type": "narration",
+      "slideIndex": 8,
+      "slideNo": 9,
+      "slideSlug": "operating-modes",
+      "cueIndex": 2,
+      "durationMs": 8200,
+      "text": "HexBlocks also supports Mode B: the same live module events can stream through the bridge to external software, including OSC-based creative coding and interactive media tools."
+    },
+    {
+      "id": "10-closing-narration-01",
+      "file": "10-closing-narration-01.mp3",
+      "type": "narration",
+      "slideIndex": 9,
+      "slideNo": 10,
+      "slideSlug": "closing",
+      "cueIndex": 0,
+      "durationMs": 6200,
+      "text": "For technical details, hardware and enclosure designs, and how semantic continuity is implemented, please visit our GitHub repository."
+    },
+    {
+      "id": "10-closing-narration-02",
+      "file": "10-closing-narration-02.mp3",
+      "type": "narration",
+      "slideIndex": 9,
+      "slideNo": 10,
+      "slideSlug": "closing",
+      "cueIndex": 1,
+      "durationMs": 6200,
+      "text": "The repository also includes simulator and walkthrough materials, so you can try the authoring flow even without physical devices."
+    },
+    {
+      "id": "10-closing-narration-03",
+      "file": "10-closing-narration-03.mp3",
+      "type": "narration",
+      "slideIndex": 9,
+      "slideNo": 10,
+      "slideSlug": "closing",
+      "cueIndex": 2,
+      "durationMs": 14000,
+      "text": "This concludes our presentation. Thank you for watching. HexBlocks is open source, and we welcome collaboration in research, education, creative coding, and interactive hardware prototyping. Please feel free to reach out if you are interested in using, extending, or contributing to HexBlocks."
+    }
+  ],
+  "results": [
+    {
+      "id": "01-title-narration-01",
+      "file": "01-title-narration-01.mp3",
+      "ok": true,
+      "bytes": 57069,
+      "attempts": 1,
+      "elapsedSec": 2.04
+    },
+    {
+      "id": "02-llm-era-prototyping-narration-01",
+      "file": "02-llm-era-prototyping-narration-01.mp3",
+      "ok": true,
+      "bytes": 27501,
+      "attempts": 1,
+      "elapsedSec": 1.27
+    },
+    {
+      "id": "02-llm-era-prototyping-narration-02",
+      "file": "02-llm-era-prototyping-narration-02.mp3",
+      "ok": true,
+      "bytes": 51117,
+      "attempts": 1,
+      "elapsedSec": 1.8
+    },
+    {
+      "id": "02-llm-era-prototyping-narration-03",
+      "file": "02-llm-era-prototyping-narration-03.mp3",
+      "ok": true,
+      "bytes": 40941,
+      "attempts": 1,
+      "elapsedSec": 1.59
+    },
+    {
+      "id": "02-llm-era-prototyping-narration-04",
+      "file": "02-llm-era-prototyping-narration-04.mp3",
+      "ok": true,
+      "bytes": 49581,
+      "attempts": 1,
+      "elapsedSec": 1.74
+    },
+    {
+      "id": "02-llm-era-prototyping-narration-05",
+      "file": "02-llm-era-prototyping-narration-05.mp3",
+      "ok": true,
+      "bytes": 47277,
+      "attempts": 1,
+      "elapsedSec": 1.74
+    },
+    {
+      "id": "03-llm-hardware-breakdown-narration-01",
+      "file": "03-llm-hardware-breakdown-narration-01.mp3",
+      "ok": true,
+      "bytes": 34797,
+      "attempts": 1,
+      "elapsedSec": 1.36
+    },
+    {
+      "id": "03-llm-hardware-breakdown-narration-02",
+      "file": "03-llm-hardware-breakdown-narration-02.mp3",
+      "ok": true,
+      "bytes": 40941,
+      "attempts": 1,
+      "elapsedSec": 1.5
+    },
+    {
+      "id": "03-llm-hardware-breakdown-narration-03",
+      "file": "03-llm-hardware-breakdown-narration-03.mp3",
+      "ok": true,
+      "bytes": 69357,
+      "attempts": 1,
+      "elapsedSec": 2.31
+    },
+    {
+      "id": "03-llm-hardware-breakdown-narration-04",
+      "file": "03-llm-hardware-breakdown-narration-04.mp3",
+      "ok": true,
+      "bytes": 68205,
+      "attempts": 1,
+      "elapsedSec": 2.21
+    },
+    {
+      "id": "03-llm-hardware-breakdown-narration-05",
+      "file": "03-llm-hardware-breakdown-narration-05.mp3",
+      "ok": true,
+      "bytes": 71853,
+      "attempts": 1,
+      "elapsedSec": 2.35
+    },
+    {
+      "id": "04-related-work-narration-01",
+      "file": "04-related-work-narration-01.mp3",
+      "ok": true,
+      "bytes": 74349,
+      "attempts": 1,
+      "elapsedSec": 2.38
+    },
+    {
+      "id": "04-related-work-narration-02",
+      "file": "04-related-work-narration-02.mp3",
+      "ok": true,
+      "bytes": 68397,
+      "attempts": 1,
+      "elapsedSec": 2.18
+    },
+    {
+      "id": "05-hexblocks-overview-narration-01",
+      "file": "05-hexblocks-overview-narration-01.mp3",
+      "ok": true,
+      "bytes": 63405,
+      "attempts": 1,
+      "elapsedSec": 2.12
+    },
+    {
+      "id": "05-hexblocks-overview-narration-02",
+      "file": "05-hexblocks-overview-narration-02.mp3",
+      "ok": true,
+      "bytes": 66861,
+      "attempts": 1,
+      "elapsedSec": 2.36
+    },
+    {
+      "id": "05-hexblocks-overview-narration-03",
+      "file": "05-hexblocks-overview-narration-03.mp3",
+      "ok": true,
+      "bytes": 25005,
+      "attempts": 1,
+      "elapsedSec": 1.24
+    },
+    {
+      "id": "06-system-overview-video-video-01",
+      "file": "06-system-overview-video-video-01.mp3",
+      "ok": true,
+      "bytes": 27501,
+      "attempts": 1,
+      "elapsedSec": 1.16
+    },
+    {
+      "id": "06-system-overview-video-video-02",
+      "file": "06-system-overview-video-video-02.mp3",
+      "ok": true,
+      "bytes": 49773,
+      "attempts": 1,
+      "elapsedSec": 1.77
+    },
+    {
+      "id": "06-system-overview-video-video-03",
+      "file": "06-system-overview-video-video-03.mp3",
+      "ok": true,
+      "bytes": 27501,
+      "attempts": 1,
+      "elapsedSec": 1.08
+    },
+    {
+      "id": "06-system-overview-video-video-04",
+      "file": "06-system-overview-video-video-04.mp3",
+      "ok": true,
+      "bytes": 28845,
+      "attempts": 1,
+      "elapsedSec": 1.16
+    },
+    {
+      "id": "06-system-overview-video-video-05",
+      "file": "06-system-overview-video-video-05.mp3",
+      "ok": true,
+      "bytes": 34797,
+      "attempts": 1,
+      "elapsedSec": 1.35
+    },
+    {
+      "id": "06-system-overview-video-video-06",
+      "file": "06-system-overview-video-video-06.mp3",
+      "ok": true,
+      "bytes": 33837,
+      "attempts": 1,
+      "elapsedSec": 1.31
+    },
+    {
+      "id": "06-system-overview-video-video-07",
+      "file": "06-system-overview-video-video-07.mp3",
+      "ok": true,
+      "bytes": 36333,
+      "attempts": 1,
+      "elapsedSec": 1.38
+    },
+    {
+      "id": "07-semantic-continuity-narration-01",
+      "file": "07-semantic-continuity-narration-01.mp3",
+      "ok": true,
+      "bytes": 59565,
+      "attempts": 1,
+      "elapsedSec": 1.99
+    },
+    {
+      "id": "07-semantic-continuity-narration-02",
+      "file": "07-semantic-continuity-narration-02.mp3",
+      "ok": true,
+      "bytes": 27501,
+      "attempts": 1,
+      "elapsedSec": 1.26
+    },
+    {
+      "id": "07-semantic-continuity-narration-03",
+      "file": "07-semantic-continuity-narration-03.mp3",
+      "ok": true,
+      "bytes": 19053,
+      "attempts": 1,
+      "elapsedSec": 1.04
+    },
+    {
+      "id": "07-semantic-continuity-narration-04",
+      "file": "07-semantic-continuity-narration-04.mp3",
+      "ok": true,
+      "bytes": 42285,
+      "attempts": 1,
+      "elapsedSec": 1.53
+    },
+    {
+      "id": "07-semantic-continuity-narration-05",
+      "file": "07-semantic-continuity-narration-05.mp3",
+      "ok": true,
+      "bytes": 48621,
+      "attempts": 1,
+      "elapsedSec": 1.71
+    },
+    {
+      "id": "07-semantic-continuity-narration-06",
+      "file": "07-semantic-continuity-narration-06.mp3",
+      "ok": true,
+      "bytes": 41133,
+      "attempts": 1,
+      "elapsedSec": 1.48
+    },
+    {
+      "id": "07-semantic-continuity-narration-07",
+      "file": "07-semantic-continuity-narration-07.mp3",
+      "ok": true,
+      "bytes": 41133,
+      "attempts": 1,
+      "elapsedSec": 1.67
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-01",
+      "file": "08-light-theremin-walkthrough-video-video-01.mp3",
+      "ok": true,
+      "bytes": 22509,
+      "attempts": 1,
+      "elapsedSec": 1.06
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-02",
+      "file": "08-light-theremin-walkthrough-video-video-02.mp3",
+      "ok": true,
+      "bytes": 32493,
+      "attempts": 1,
+      "elapsedSec": 1.27
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-03",
+      "file": "08-light-theremin-walkthrough-video-video-03.mp3",
+      "ok": true,
+      "bytes": 31533,
+      "attempts": 1,
+      "elapsedSec": 1.32
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-04",
+      "file": "08-light-theremin-walkthrough-video-video-04.mp3",
+      "ok": true,
+      "bytes": 43821,
+      "attempts": 1,
+      "elapsedSec": 1.61
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-05",
+      "file": "08-light-theremin-walkthrough-video-video-05.mp3",
+      "ok": true,
+      "bytes": 50925,
+      "attempts": 1,
+      "elapsedSec": 1.66
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-06",
+      "file": "08-light-theremin-walkthrough-video-video-06.mp3",
+      "ok": true,
+      "bytes": 47085,
+      "attempts": 1,
+      "elapsedSec": 1.64
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-07",
+      "file": "08-light-theremin-walkthrough-video-video-07.mp3",
+      "ok": true,
+      "bytes": 44781,
+      "attempts": 1,
+      "elapsedSec": 1.7
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-08",
+      "file": "08-light-theremin-walkthrough-video-video-08.mp3",
+      "ok": true,
+      "bytes": 46125,
+      "attempts": 1,
+      "elapsedSec": 1.58
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-09",
+      "file": "08-light-theremin-walkthrough-video-video-09.mp3",
+      "ok": true,
+      "bytes": 37293,
+      "attempts": 1,
+      "elapsedSec": 2.44
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-10",
+      "file": "08-light-theremin-walkthrough-video-video-10.mp3",
+      "ok": true,
+      "bytes": 39789,
+      "attempts": 1,
+      "elapsedSec": 1.41
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-11",
+      "file": "08-light-theremin-walkthrough-video-video-11.mp3",
+      "ok": true,
+      "bytes": 48621,
+      "attempts": 1,
+      "elapsedSec": 1.73
+    },
+    {
+      "id": "08-light-theremin-walkthrough-video-video-12",
+      "file": "08-light-theremin-walkthrough-video-video-12.mp3",
+      "ok": true,
+      "bytes": 34989,
+      "attempts": 1,
+      "elapsedSec": 1.37
+    },
+    {
+      "id": "09-operating-modes-narration-01",
+      "file": "09-operating-modes-narration-01.mp3",
+      "ok": true,
+      "bytes": 41133,
+      "attempts": 1,
+      "elapsedSec": 1.51
+    },
+    {
+      "id": "09-operating-modes-narration-02",
+      "file": "09-operating-modes-narration-02.mp3",
+      "ok": true,
+      "bytes": 76653,
+      "attempts": 1,
+      "elapsedSec": 2.44
+    },
+    {
+      "id": "09-operating-modes-narration-03",
+      "file": "09-operating-modes-narration-03.mp3",
+      "ok": true,
+      "bytes": 68397,
+      "attempts": 1,
+      "elapsedSec": 2.16
+    },
+    {
+      "id": "10-closing-narration-01",
+      "file": "10-closing-narration-01.mp3",
+      "ok": true,
+      "bytes": 53421,
+      "attempts": 1,
+      "elapsedSec": 1.78
+    },
+    {
+      "id": "10-closing-narration-02",
+      "file": "10-closing-narration-02.mp3",
+      "ok": true,
+      "bytes": 50925,
+      "attempts": 1,
+      "elapsedSec": 1.76
+    },
+    {
+      "id": "10-closing-narration-03",
+      "file": "10-closing-narration-03.mp3",
+      "ok": true,
+      "bytes": 110061,
+      "attempts": 1,
+      "elapsedSec": 3.4
+    }
+  ]
+}
