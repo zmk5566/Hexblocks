@@ -1,6 +1,8 @@
 # HexBlocks
 
-![HexBlocks modules arranged for a live prototype](https://zmk5566.github.io/Hexblocks/pics/ending-pic.jpg)
+<p align="center">
+  <img src="https://zmk5566.github.io/Hexblocks/pics/ending-pic.jpg" alt="HexBlocks modules arranged for a live prototype" width="320">
+</p>
 
 HexBlocks is an open-source software-hardware framework for rapid, on-the-fly prototyping of reconfigurable physical interfaces.
 
