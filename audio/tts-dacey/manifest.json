@@ -1,12 +1,12 @@
 {
   "generatedAt": "2026-06-04T10:47:53.365Z",
-  "renderedAt": "2026-06-05T08:43:19Z",
+  "renderedAt": "2026-06-10T21:54:34Z",
   "voice": "en_female_dacey_uranus_bigtts",
   "format": "mp3",
   "sampleRate": 24000,
   "speechRate": 30,
   "speed": 1.3,
-  "source": "video/light-theremin-walkthrough/hexblocks-presentation-data.js",
+  "source": "hexblocks-presentation-data.js",
   "count": 48,
   "entries": [
     {
@@ -18,7 +18,7 @@
       "slideSlug": "title",
       "cueIndex": 0,
       "durationMs": 9000,
-      "text": "In this video, we present HexBlocks, an open-source software-hardware framework for no-compile prototyping of reconfigurable physical interfaces."
+      "text": "In this video, we present HexBlocks, an open-source software-hardware framework for rapid, on-the-fly prototyping of reconfigurable physical interfaces."
     },
     {
       "id": "02-llm-era-prototyping-narration-01",
@@ -562,9 +562,9 @@
       "id": "01-title-narration-01",
       "file": "01-title-narration-01.mp3",
       "ok": true,
-      "bytes": 57069,
+      "bytes": 61869,
       "attempts": 1,
-      "elapsedSec": 2.04
+      "elapsedSec": 2.06
     },
     {
       "id": "02-llm-era-prototyping-narration-01",

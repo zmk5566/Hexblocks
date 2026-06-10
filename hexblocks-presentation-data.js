@@ -181,7 +181,7 @@
         sub: 'github.com/zmk5566/HexBlocks',
         narration: [
           {
-            text: 'In this video, we present HexBlocks, an open-source software-hardware framework for no-compile prototyping of reconfigurable physical interfaces.',
+            text: 'In this video, we present HexBlocks, an open-source software-hardware framework for rapid, on-the-fly prototyping of reconfigurable physical interfaces.',
             durationMs: 9000
           }
         ]
