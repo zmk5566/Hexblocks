@@ -1,6 +1,10 @@
 <h1 align="center">HexBlocks</h1>
 
 <p align="center">
+  <em>Open-Source Prototyping of Reconfigurable Physical Interfaces with Semantic Continuity</em>
+</p>
+
+<p align="center">
   <img src="https://zmk5566.github.io/Hexblocks/pics/ending-pic.jpg" alt="HexBlocks modules arranged for a live prototype" width="320">
 </p>
 
