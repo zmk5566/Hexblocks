@@ -12,13 +12,9 @@
   <img src="https://zmk5566.github.io/Hexblocks/pics/ending-pic.jpg" alt="HexBlocks modules arranged for a live prototype" width="320">
 </p>
 
-HexBlocks is an open-source software-hardware framework for rapid, on-the-fly prototyping of reconfigurable physical interfaces.
+HexBlocks is an open-source software-hardware framework for rapid, on-the-fly prototyping of reconfigurable physical interfaces. It combines magnetic sensor/actuator modules, a battery-powered hub, a browser authoring UI, and a live schema in one workspace.
 
-The walkthrough starts from a simple interaction idea: build a light theremin from physical modules. A user asks what modules are needed, snaps the suggested blocks onto the hub, and sees the live topology and module capabilities appear in the browser. The same workspace can then ask an LLM to draft behavior, inspect the result as editable Blockly rules, and deploy the accepted program back to the hardware.
-
-The core idea is semantic continuity. Physical modules, authoring references, and runtime targets stay bound to the same UID-keyed entities as the assembly changes. Users can add, move, swap, or stack modules without restarting the whole authoring process.
-
-The reference implementation uses hex-shaped magnetic sensor and actuator blocks connected through a battery-powered hub. It supports hub-resident Event-Condition-Action execution for standalone prototypes, and sensor-stream integration for browser tools and OSC-based creative-coding environments.
+The core design goal is semantic continuity: physical modules, authoring references, and runtime targets stay bound to stable UID-keyed entities as the assembly changes. The reference implementation supports hub-resident Event-Condition-Action execution for standalone prototypes and sensor-stream integration through a Python bridge for browser and OSC workflows.
 
 ## Interface
 
