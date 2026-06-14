@@ -137,7 +137,10 @@ Same hardware setup as Mode A. The hub keeps any uploaded program running; the b
    # USB-CDC (auto-detect or pass a port)
    python serial_bridge.py /dev/cu.usbmodem*
 
-   # BLE (pair address discovered via the devices panel, then)
+   # BLE first run: start idle, then scan/connect from the browser Devices panel.
+   python serial_bridge.py --idle
+
+   # BLE direct reconnect, after a device address is known:
    python serial_bridge.py --ble <BLE_ADDRESS>
 
    # No hardware? Headless simulator with three demo programs:
