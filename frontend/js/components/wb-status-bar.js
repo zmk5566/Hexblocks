@@ -312,7 +312,7 @@ export class WbStatusBar extends LitElement {
 
         <button
           class="transport-btn ${this.transport && this.transport.connected ? 'active' : ''}"
-          title="Manage wireless devices (BLE pairing)"
+          title="Manage hub connections (USB serial or BLE)"
           @click=${() => this.dispatchEvent(new CustomEvent('open-devices-panel',
               { bubbles: true, composed: true }))}
         >

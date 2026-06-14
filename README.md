@@ -137,7 +137,7 @@ Same hardware setup as Mode A. The hub keeps any uploaded program running; the b
    # USB-CDC (auto-detect or pass a port)
    python serial_bridge.py /dev/cu.usbmodem*
 
-   # BLE first run: start idle, then scan/connect from the browser Devices panel.
+   # First run: start idle, then choose USB serial or BLE in the Connections panel.
    python serial_bridge.py --idle
 
    # BLE direct reconnect, after a device address is known:
@@ -177,8 +177,8 @@ Tested with CPython 3.11. No `pyproject.toml`; the bridge is a small set of scri
 The frontend is plain ES modules. There is no bundler and no build step.
 `serial_bridge.py` serves `frontend/index.html` and `frontend/js/` directly
 over HTTP on port 3000. Open `http://localhost:3000` in a Chromium-based
-browser. The BLE pairing UI is mediated by the Python bridge, so Firefox also
-works for the bridge-mediated path.
+browser. The Connections panel is mediated by the Python bridge, so USB serial
+selection and BLE pairing also work in Firefox.
 
 ## License
 

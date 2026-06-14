@@ -734,10 +734,14 @@ async def ws_handler(ws):
     if last_transport_status.get("transport") is not None or \
        last_transport_status.get("connected"):
         await ws.send(json.dumps(last_transport_status))
-    # Replay paired-devices list so the Devices panel can render it
+    # Replay paired-devices list so the Connections panel can render it
     # without an extra round-trip.
     await ws.send(json.dumps({"type": "paired_devices",
                                "devices": _load_paired()}))
+    # Replay currently visible USB serial ports so the Connections panel can
+    # offer a connection choice when the bridge was started with --idle.
+    await ws.send(json.dumps({"type": "serial_ports",
+                               "ports": serial_io.find_ports()}))
     # Replay current OSC target list so the panel renders without
     # an explicit osc_list round-trip.
     await ws.send(json.dumps({"type": "osc_state",
@@ -838,6 +842,9 @@ async def ws_handler(ws):
                 elif action == "ble_scan":
                     duration = float(inbound.get("duration", 5))
                     asyncio.create_task(_run_ble_scan(duration))
+                elif action == "serial_list":
+                    await ws.send(json.dumps({"type": "serial_ports",
+                                               "ports": serial_io.find_ports()}))
                 elif action == "ble_connect":
                     addr = str(inbound.get("address", "")).strip()
                     name = str(inbound.get("name", "")).strip() or addr
@@ -846,7 +853,7 @@ async def ws_handler(ws):
                         await transport_request.put(("ble", addr, name))
                         await broadcast({"type": "paired_devices",
                                           "devices": _load_paired()})
-                elif action == "ble_disconnect":
+                elif action in ("ble_disconnect", "transport_disconnect"):
                     await transport_request.put(("none",))
                 elif action == "ble_forget":
                     addr = str(inbound.get("address", "")).strip()

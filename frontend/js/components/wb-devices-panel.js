@@ -1,19 +1,23 @@
 /**
- * <wb-devices-panel> — Wireless device pairing modal.
+ * <wb-devices-panel> — hub connection modal.
  *
- * Lets the user scan for nearby HEX-* hubs over BLE, connect/forget
- * paired devices, and toggle which one auto-reconnects on bridge start.
- * The bridge owns the source of truth (paired_devices.json); this panel
+ * Lets the user choose a USB serial port, scan for nearby HEX-* hubs over BLE,
+ * connect/forget paired BLE devices, and toggle BLE auto-reconnect on bridge
+ * start. The bridge owns the source of truth (paired_devices.json); this panel
  * mirrors it for display.
  *
  * Bridge protocol (WS messages):
  *   ←  {type:'transport_status', transport:'serial'|'ble'|null,
  *       address, label, connected}
+ *   ←  {type:'serial_ports', ports:[path]}
  *   ←  {type:'paired_devices', devices:[{address,name,last_seen,auto_reconnect}]}
  *   ←  {type:'ble_scan_started', duration}
  *   ←  {type:'ble_scan_result', address, name, rssi}
  *   ←  {type:'ble_scan_done', count}
  *   ←  {type:'ble_scan_error', error}
+ *   →  {action:'serial_list'}
+ *   →  {action:'transport_use_serial', port}
+ *   →  {action:'transport_disconnect'}
  *   →  {action:'ble_scan', duration}
  *   →  {action:'ble_connect', address, name}
  *   →  {action:'ble_disconnect'}
@@ -30,6 +34,8 @@ export class WbDevicesPanel extends LitElement {
     open:         { type: Boolean, reflect: true },
     _scanning:    { type: Boolean, state: true },
     _scanResults: { type: Array,   state: true },
+    _serialPorts: { type: Array,   state: true },
+    _serialBusy:  { type: Boolean, state: true },
     _paired:      { type: Array,   state: true },
     _transport:   { type: Object,  state: true },
     _error:       { type: String,  state: true },
@@ -198,6 +204,8 @@ export class WbDevicesPanel extends LitElement {
     this.open = false;
     this._scanning = false;
     this._scanResults = [];
+    this._serialPorts = [];
+    this._serialBusy = false;
     this._paired = [];
     this._transport = { transport: null, label: null, address: null, connected: false };
     this._error = '';
@@ -217,11 +225,22 @@ export class WbDevicesPanel extends LitElement {
     super.disconnectedCallback();
   }
 
+  updated(changed) {
+    if (changed.has('open') && this.open) {
+      this._refreshSerialPorts();
+    }
+  }
+
   _handleMessage(msg) {
     if (!msg || !msg.type) return;
     switch (msg.type) {
       case 'transport_status':
         this._transport = { ...msg };
+        break;
+      case 'serial_ports':
+        this._serialBusy = false;
+        this._error = '';
+        this._serialPorts = Array.isArray(msg.ports) ? msg.ports : [];
         break;
       case 'paired_devices':
         this._paired = Array.isArray(msg.devices) ? msg.devices : [];
@@ -260,12 +279,26 @@ export class WbDevicesPanel extends LitElement {
     wsClient.send({ action: 'ble_scan', duration: SCAN_DURATION_S });
   }
 
+  _refreshSerialPorts() {
+    this._serialBusy = true;
+    this._error = '';
+    if (!wsClient.send({ action: 'serial_list' })) {
+      this._serialBusy = false;
+      this._error = 'bridge is not connected';
+    }
+  }
+
+  _connectSerial(port) {
+    if (!port) return;
+    wsClient.send({ action: 'transport_use_serial', port });
+  }
+
   _connect(addr, name) {
     wsClient.send({ action: 'ble_connect', address: addr, name: name || addr });
   }
 
   _disconnect() {
-    wsClient.send({ action: 'ble_disconnect' });
+    wsClient.send({ action: 'transport_disconnect' });
   }
 
   _forget(addr) {
@@ -281,8 +314,10 @@ export class WbDevicesPanel extends LitElement {
     });
   }
 
-  _isActive(addr) {
-    return this._transport.connected && this._transport.address === addr;
+  _isActive(addr, transport = null) {
+    return this._transport.connected &&
+      this._transport.address === addr &&
+      (!transport || this._transport.transport === transport);
   }
 
   _rssiBars(rssi) {
@@ -302,7 +337,7 @@ export class WbDevicesPanel extends LitElement {
     return html`
       <div class="modal" @click=${(e) => e.stopPropagation()}>
         <header>
-          <h2>Wireless Devices</h2>
+          <h2>Connections</h2>
           <button class="close" @click=${this._close} title="Close (Esc)">✕</button>
         </header>
         <div class="body">
@@ -311,7 +346,7 @@ export class WbDevicesPanel extends LitElement {
             <span class="dot ${t.connected ? 'on' : 'off'}"></span>
             <span class="label">${transportLabel}</span>
             <span class="meta">${t.connected ? 'connected' : 'idle'}</span>
-            ${t.connected && t.transport === 'ble' ? html`
+            ${t.connected ? html`
               <button class="act" @click=${this._disconnect}>Disconnect</button>
             ` : ''}
           </div>
@@ -319,7 +354,35 @@ export class WbDevicesPanel extends LitElement {
           ${this._error ? html`<div class="error">${this._error}</div>` : ''}
 
           <section>
-            <h3>Paired Devices</h3>
+            <h3>USB Serial</h3>
+            <div class="scan-bar">
+              <button class="act primary"
+                      ?disabled=${this._serialBusy}
+                      @click=${this._refreshSerialPorts}>
+                ${this._serialBusy ? 'Refreshing...' : 'Refresh ports'}
+              </button>
+              <span class="hint">Connect a hub over USB-CDC when the bridge is idle</span>
+            </div>
+            ${this._serialPorts.length === 0
+              ? html`<div class="empty">${this._serialBusy
+                  ? 'Looking for serial ports...'
+                  : 'No serial ports found.'}</div>`
+              : this._serialPorts.map(port => html`
+                  <div class="row">
+                    <span class="name">USB hub</span>
+                    <span class="addr">${port}</span>
+                    <span class="actions">
+                      ${this._isActive(port, 'serial')
+                        ? html`<button class="act" disabled>Active</button>`
+                        : html`<button class="act primary"
+                                       @click=${() => this._connectSerial(port)}>Connect</button>`}
+                    </span>
+                  </div>
+                `)}
+          </section>
+
+          <section>
+            <h3>BLE Paired Devices</h3>
             ${this._paired.length === 0
               ? html`<div class="empty">No paired devices yet — scan and connect to add one.</div>`
               : this._paired.map(d => html`
@@ -333,7 +396,7 @@ export class WbDevicesPanel extends LitElement {
                                @change=${(e) => this._toggleAutoReconnect(d, e.target.checked)}>
                         auto
                       </label>
-                      ${this._isActive(d.address)
+                      ${this._isActive(d.address, 'ble')
                         ? html`<button class="act" disabled>Active</button>`
                         : html`<button class="act primary"
                                        @click=${() => this._connect(d.address, d.name)}>Connect</button>`}
@@ -344,7 +407,7 @@ export class WbDevicesPanel extends LitElement {
           </section>
 
           <section>
-            <h3>Scan</h3>
+            <h3>BLE Scan</h3>
             <div class="scan-bar">
               <button class="act primary"
                       ?disabled=${this._scanning}
@@ -365,7 +428,7 @@ export class WbDevicesPanel extends LitElement {
                       <span class="addr">${d.address}</span>
                       <span class="rssi">${this._rssiBars(d.rssi)} ${d.rssi}dBm</span>
                       <span class="actions">
-                        ${this._isActive(d.address)
+                        ${this._isActive(d.address, 'ble')
                           ? html`<button class="act" disabled>Active</button>`
                           : html`<button class="act primary"
                                          @click=${() => this._connect(d.address, d.name)}>
