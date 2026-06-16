@@ -167,8 +167,8 @@ From the debug console (🔧 floating button):
 ## Troubleshooting
 
 - **"spike" says "unknown channel"**: the channel name must match the
-  per-type data key (`ax`/`ay`/`az`/`gx`/`gy`/`gz` for IMU, `ax`/`ay`
-  for HR → BPM/SpO2, `ax`/`ay`/`az` for temp → celsius/humidity/pressure).
+  per-type data key (`ax`/`ay`/`az`/`gx`/`gy`/`gz` for IMU, `bpm`/`spo2`
+  for HR, `celsius`/`humidity` for temp, `light` for light sensors).
   See `SIM_CHANNEL_MAP` in `serial_bridge.py`.
 - **LED swatch stays red after page reload but no events arrive**: the
   WS `actuator_cache` replay is working. Send `$PC` (clear) from the

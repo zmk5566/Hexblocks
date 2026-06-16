@@ -124,8 +124,8 @@ private:
 MirrorStream out;
 
 // ── Pin assignment ─────────────────────────────────────────────
-#define CAN_TX_PIN   6
-#define CAN_RX_PIN   7
+#define CAN_TX_PIN   7
+#define CAN_RX_PIN   6
 #define STATUS_LED   9
 
 const uint8_t FACE_PIN[6] = {0, 2, 3, 4, 8, 10};

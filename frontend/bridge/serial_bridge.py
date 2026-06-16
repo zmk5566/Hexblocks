@@ -262,16 +262,16 @@ last_eca_status:   dict | None = None
 last_eca_bytecode: dict | None = None
 
 # ── ECA engine (used in --sim modes only) ──────────────────────
-# Per-module-type mapping from sensor data field name → ECA channel id.
-# `sim_sensor_data` reuses `ax`/`ay`/`az` as a generic 3-axis payload for
-# every module type (see lines ~395-415), so HR/temp need explicit remaps.
+# Per-module-type mapping from simulator data field name → ECA channel id.
+# Field names should match the channel catalog labels so legacy batched
+# simulator payloads do not surface fake axis names in the frontend.
 SIM_CHANNEL_MAP = {
     "imu":  {"ax": CH.AX, "ay": CH.AY, "az": CH.AZ,
              "gx": CH.GX, "gy": CH.GY, "gz": CH.GZ},
-    "hr":   {"ax": CH.BPM, "ay": CH.SPO2},
-    "temp": {"ax": CH.CELSIUS, "ay": CH.HUMIDITY},
-    "knob": {"ax": CH.KNOB},
-    "light": {"ax": CH.LIGHT},
+    "hr":   {"bpm": CH.BPM, "spo2": CH.SPO2},
+    "temp": {"celsius": CH.CELSIUS, "humidity": CH.HUMIDITY},
+    "knob": {"knob": CH.KNOB},
+    "light": {"light": CH.LIGHT},
 }
 
 # One global engine. The on_action callback is set later (after dispatch_action
@@ -1410,27 +1410,20 @@ def sim_sensor_data(mod_type: str, t: float) -> dict | None:
         # Range 0..1 (normalized), mimics LDR voltage divider output
         base = 0.5 + math.sin(t * 0.05) * 0.3  # slow drift
         light = max(0.0, min(1.0, base + _noise(0.01)))
-        return {
-            "ax": round(light, 3),
-            "ay": 0, "az": 0, "gx": 0, "gy": 0, "gz": 0,
-        }
+        return {"light": round(light, 3)}
     if mod_type == "hr":
         bpm = 72 + math.sin(t * 0.1) * 8 + _noise(2)
         spo2 = 97.5 + math.sin(t * 0.05) * 0.8 + _noise(0.2)
         return {
-            "ax": round(bpm, 1),        # repurpose ax for BPM
-            "ay": round(spo2, 1),       # repurpose ay for SpO2
-            "az": 0, "gx": 0, "gy": 0, "gz": 0,
+            "bpm": round(bpm, 1),
+            "spo2": round(spo2, 1),
         }
     if mod_type == "temp":
         temp = 22.5 + math.sin(t * 0.02) * 1.5 + _noise(0.1)
         hum = 45.0 + math.sin(t * 0.03) * 5.0 + _noise(0.5)
-        pres = 1013.25 + math.sin(t * 0.01) * 2.0 + _noise(0.1)
         return {
-            "ax": round(temp, 2),       # repurpose ax for temperature
-            "ay": round(hum, 1),        # repurpose ay for humidity
-            "az": round(pres, 1),       # repurpose az for pressure
-            "gx": 0, "gy": 0, "gz": 0,
+            "celsius": round(temp, 2),
+            "humidity": round(hum, 1),
         }
     return None
 
