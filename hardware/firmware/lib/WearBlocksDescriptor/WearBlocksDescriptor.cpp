@@ -53,6 +53,15 @@ uint16_t WearBlocksDescriptor::serialize(uint8_t* buffer, uint16_t maxLen) const
         plc.add(physical.placements[i]);
     }
 
+    JsonArray cfg = doc["cfg"].to<JsonArray>();
+    for (uint8_t i = 0; i < numConfigFields; i++) {
+        JsonObject f = cfg.add<JsonObject>();
+        f["k"] = configFields[i].key;
+        f["t"] = configFields[i].type;
+        f["d"] = configFields[i].defaultValue;
+        f["l"] = configFields[i].label;
+    }
+
     size_t len = serializeJson(doc, (char*)buffer, maxLen);
     return (uint16_t)len;
 }
@@ -123,6 +132,18 @@ bool WearBlocksDescriptor::deserialize(const uint8_t* buffer, uint16_t len) {
         physical.numPlacements++;
     }
 
+    JsonArray cfg = doc["cfg"].as<JsonArray>();
+    numConfigFields = 0;
+    for (JsonObject f : cfg) {
+        if (numConfigFields >= WB_DESC_MAX_CONFIG_FIELDS) break;
+        WBConfigField& cf = configFields[numConfigFields];
+        strlcpy(cf.key, f["k"] | "", sizeof(cf.key));
+        strlcpy(cf.type, f["t"] | "", sizeof(cf.type));
+        strlcpy(cf.defaultValue, f["d"] | "", sizeof(cf.defaultValue));
+        strlcpy(cf.label, f["l"] | "", sizeof(cf.label));
+        numConfigFields++;
+    }
+
     return true;
 }
 
@@ -156,8 +177,8 @@ bool WearBlocksDescriptor::loadFromFlash(const char* nsName) {
 }
 
 String WearBlocksDescriptor::toJSON() const {
-    uint8_t buf[WB_DESC_MAX_SERIALIZED];
-    uint16_t len = serialize(buf, sizeof(buf));
+    uint8_t buf[WB_DESC_MAX_SERIALIZED + 1];
+    uint16_t len = serialize(buf, WB_DESC_MAX_SERIALIZED);
     buf[len] = '\0';
     return String((char*)buf);
 }
@@ -202,6 +223,17 @@ String WearBlocksDescriptor::toLLMPrompt() const {
         s += String(physical.placements[i]);
     }
     s += "\n";
+
+    if (numConfigFields > 0) {
+        s += "Configurable settings:\n";
+        for (uint8_t i = 0; i < numConfigFields; i++) {
+            const WBConfigField& f = configFields[i];
+            s += "  - " + String(f.key) + " (" + String(f.type) + ")";
+            if (f.defaultValue[0]) s += ", default " + String(f.defaultValue);
+            if (f.label[0]) s += ": " + String(f.label);
+            s += "\n";
+        }
+    }
 
     return s;
 }

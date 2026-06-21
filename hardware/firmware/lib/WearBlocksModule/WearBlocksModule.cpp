@@ -32,6 +32,22 @@ bool WBModule::begin(uint8_t canTx, uint8_t canRx) {
 }
 
 void WBModule::start() {
+    bool hasTransportConfig = false;
+    for (uint8_t i = 0; i < _descriptor.numConfigFields; i++) {
+        if (strcmp(_descriptor.configFields[i].key, "transport_mode") == 0) {
+            hasTransportConfig = true;
+            break;
+        }
+    }
+    if (!hasTransportConfig &&
+        _descriptor.numConfigFields < WB_DESC_MAX_CONFIG_FIELDS) {
+        WBConfigField& f = _descriptor.configFields[_descriptor.numConfigFields++];
+        strlcpy(f.key, "transport_mode", sizeof(f.key));
+        strlcpy(f.type, "enum", sizeof(f.type));
+        strlcpy(f.defaultValue, "can_primary_wifi_fallback", sizeof(f.defaultValue));
+        strlcpy(f.label, "CAN/Wi-Fi routing policy", sizeof(f.label));
+    }
+
     uint8_t buf[WB_DESC_MAX_SERIALIZED];
     uint16_t len = _descriptor.serialize(buf, sizeof(buf));
     _fwHash = crc16(buf, len);

@@ -27,6 +27,7 @@ static bool wbEcaIsTransientChannel(uint8_t channelId) {
 
 WearBlocksECA::WearBlocksECA()
     : _uidToSlot(nullptr),
+      _actuatorDispatch(nullptr), _topicDispatch(nullptr),
       _numVCs(0), _numRules(0), _running(false), _hasProgram(false),
       _rawLen(0), _proto(nullptr) {
     memset(_cache, 0, sizeof(_cache));
@@ -46,6 +47,23 @@ WearBlocksECA::WearBlocksECA()
 
 void WearBlocksECA::begin(WearBlocksProtocol& proto) {
     _proto = &proto;
+}
+
+bool WearBlocksECA::dispatchActuator(uint8_t slot, uint32_t uid, uint8_t cmd,
+                                     const uint8_t* params, uint8_t paramLen) {
+    if (_actuatorDispatch) return _actuatorDispatch(slot, uid, cmd, params, paramLen);
+    if (!_proto) return false;
+    _proto->sendActuatorCommand(slot, cmd, params, paramLen);
+    return true;
+}
+
+bool WearBlocksECA::dispatchTopic(uint8_t slot, uint32_t uid, uint8_t channelId,
+                                  bool enable) {
+    if (_topicDispatch) return _topicDispatch(slot, uid, channelId, enable);
+    if (!_proto) return false;
+    if (enable) _proto->sendTopicEnable(slot, channelId);
+    else        _proto->sendTopicDisable(slot, channelId);
+    return true;
 }
 
 // ─────────────────────────────────────────────────────
@@ -509,12 +527,12 @@ void WearBlocksECA::executeAction(const WBAction& act) {
             buf[0] = clampByte(vals[0]);  // R
             buf[1] = clampByte(vals[1]);  // G
             buf[2] = clampByte(vals[2]);  // B
-            _proto->sendActuatorCommand(targetSlot, act.cmd, buf, 3);
+            dispatchActuator(targetSlot, act.target, act.cmd, buf, 3);
             break;
         }
         case ACT_LED_OFF:
         case ACT_LED_STOP:
-            _proto->sendActuatorCommand(targetSlot, act.cmd, nullptr, 0);
+            dispatchActuator(targetSlot, act.target, act.cmd, nullptr, 0);
             break;
 
         case ACT_VIBRATE: {
@@ -522,7 +540,7 @@ void WearBlocksECA::executeAction(const WBAction& act) {
             buf[0] = clampByte(vals[0]);          // intensity
             buf[1] = (dur >> 8) & 0xFF;
             buf[2] = dur & 0xFF;
-            _proto->sendActuatorCommand(targetSlot, act.cmd, buf, 3);
+            dispatchActuator(targetSlot, act.target, act.cmd, buf, 3);
             break;
         }
         case ACT_VIBRATE_PULSE: {
@@ -530,7 +548,7 @@ void WearBlocksECA::executeAction(const WBAction& act) {
             buf[1] = clampByte(vals[1]);  // on_10ms
             buf[2] = clampByte(vals[2]);  // off_10ms
             buf[3] = clampByte(vals[3]);  // count
-            _proto->sendActuatorCommand(targetSlot, act.cmd, buf, 4);
+            dispatchActuator(targetSlot, act.target, act.cmd, buf, 4);
             break;
         }
         case ACT_VIBRATE_RAMP: {
@@ -539,11 +557,11 @@ void WearBlocksECA::executeAction(const WBAction& act) {
             buf[1] = clampByte(vals[1]);  // to_pct
             buf[2] = (dur >> 8) & 0xFF;
             buf[3] = dur & 0xFF;
-            _proto->sendActuatorCommand(targetSlot, act.cmd, buf, 4);
+            dispatchActuator(targetSlot, act.target, act.cmd, buf, 4);
             break;
         }
         case ACT_VIBRATE_STOP:
-            _proto->sendActuatorCommand(targetSlot, act.cmd, nullptr, 0);
+            dispatchActuator(targetSlot, act.target, act.cmd, nullptr, 0);
             break;
 
         case ACT_AUDIO_SET_TONE: {
@@ -551,11 +569,11 @@ void WearBlocksECA::executeAction(const WBAction& act) {
             buf[0] = freq & 0xFF;          // freq_lo (LE — module_amplifier reads p[0] | p[1]<<8)
             buf[1] = (freq >> 8) & 0xFF;   // freq_hi
             buf[2] = clampByte(vals[1]);   // amp 0..255
-            _proto->sendActuatorCommand(targetSlot, act.cmd, buf, 3);
+            dispatchActuator(targetSlot, act.target, act.cmd, buf, 3);
             break;
         }
         case ACT_AUDIO_STOP:
-            _proto->sendActuatorCommand(targetSlot, act.cmd, nullptr, 0);
+            dispatchActuator(targetSlot, act.target, act.cmd, nullptr, 0);
             break;
 
         // LED RAMP/BREATHE/BLINK/RAINBOW reserved — module_led v3 only
@@ -564,7 +582,7 @@ void WearBlocksECA::executeAction(const WBAction& act) {
             uint8_t n = act.numParams;
             if (n > sizeof(buf)) n = sizeof(buf);
             for (uint8_t i = 0; i < n; i++) buf[i] = clampByte(vals[i]);
-            _proto->sendActuatorCommand(targetSlot, act.cmd, buf, n);
+            dispatchActuator(targetSlot, act.target, act.cmd, buf, n);
             break;
         }
     }
@@ -635,7 +653,7 @@ void WearBlocksECA::autoEnableTopics() {
         uint64_t bit = 1ULL << ch;
         if (enabled[slot] & bit) return;
         enabled[slot] |= bit;
-        _proto->sendTopicEnable(slot, ch);
+        dispatchTopic(slot, uid, ch, true);
     };
 
     for (uint8_t r = 0; r < _numRules; r++) {
@@ -675,7 +693,7 @@ void WearBlocksECA::autoEnableTopicsForUid(uint32_t targetUid) {
         uint64_t bit = 1ULL << ch;
         if (enabled & bit) return;
         enabled |= bit;
-        _proto->sendTopicEnable(targetSlot, ch);
+        dispatchTopic(targetSlot, uid, ch, true);
     };
 
     for (uint8_t r = 0; r < _numRules; r++) {

@@ -15,6 +15,8 @@ enum WBMessageType : uint32_t {
     WB_MSG_CHILD_EVENT_BASE = 0x060,  // 0x060-0x07F: module reports child dock/undock
     WB_MSG_TOPIC_ENABLE     = 0x080,
     WB_MSG_TOPIC_DISABLE    = 0x081,
+    WB_MSG_SYS_CONFIG       = 0x090,
+    WB_MSG_SYS_CONFIG_ACK   = 0x091,
     WB_MSG_GOODBYE          = 0x0F0,
     WB_MSG_SENSOR_BASE      = 0x100,  // 0x100-0x1FF per module
     WB_MSG_ACTUATOR_BASE    = 0x200,  // 0x200-0x2FF per module: EXECUTE
@@ -54,8 +56,13 @@ typedef void (*WBDescriptorRequestCallback)();
 typedef void (*WBAckCallback)(uint8_t assignedSlot, uint32_t uid, bool descriptorCached);
 typedef void (*WBTopicCallback)(uint8_t channelId, bool enable);
 typedef void (*WBChildEventCallback)(uint8_t sourceSlot, uint8_t childFace, bool occupied);
+typedef void (*WBSysConfigCallback)(const uint8_t* payload, uint16_t payloadLen,
+                                    uint8_t sessionId);
+typedef void (*WBSysConfigAckCallback)(uint8_t moduleSlot, uint8_t status,
+                                       uint8_t sessionId);
 
 #define WB_DESC_SESSIONS 4  // concurrent reassembly sessions (LRU)
+#define WB_SYS_CONFIG_MAX_PAYLOAD 224
 
 class WearBlocksProtocol {
 public:
@@ -65,10 +72,11 @@ public:
 
     // --- Module-side API ---
     void sendHello(uint32_t uid, uint16_t fwHash, uint8_t flags = 0);
-    void sendSensorChannel(uint8_t channelId, float value);
+    bool sendSensorChannel(uint8_t channelId, float value);
     void sendDescriptor(const WearBlocksDescriptor& desc);
     void sendGoodbye();
     void sendChildEvent(uint8_t childFace, bool occupied);
+    bool sendSysConfigAck(uint8_t status, uint8_t sessionId);
 
     // --- Hub-side API ---
     void requestDescriptor(uint8_t moduleSlot);
@@ -76,6 +84,8 @@ public:
     void sendActuatorCommand(uint8_t moduleSlot, uint8_t cmd,
                              const uint8_t* params, uint8_t paramLen);
     void sendAck(uint8_t moduleSlot, uint32_t uid, bool descriptorCached);
+    bool sendSysConfig(uint8_t moduleSlot, const uint8_t* payload,
+                       uint16_t payloadLen, uint8_t sessionId = 0);
 
     // --- Topic control ---
     void sendTopicEnable(uint8_t moduleSlot, uint8_t channelId);
@@ -103,6 +113,8 @@ public:
     void onAck(WBAckCallback cb);
     void onChildEvent(WBChildEventCallback cb);
     void onTopic(WBTopicCallback cb);
+    void onSysConfig(WBSysConfigCallback cb);
+    void onSysConfigAck(WBSysConfigAckCallback cb);
 
 private:
     void handleMessage(uint32_t canId, const uint8_t* data, uint8_t len);
@@ -122,6 +134,17 @@ private:
     DescSession _descSessions[WB_DESC_SESSIONS];
     DescSession* findOrAllocSession(uint8_t slot);
 
+    struct SysConfigSession {
+        bool     active;
+        uint8_t  sessionId;
+        uint8_t  expectedChunks;
+        uint8_t  receivedChunks;
+        uint16_t rawLen;
+        uint16_t payloadLen;
+        uint8_t  raw[WB_SYS_CONFIG_MAX_PAYLOAD + 2];
+    };
+    SysConfigSession _sysConfigSession;
+
     WearBlocksCAN* _can;
     bool _isHub;
     uint8_t _moduleSlot;
@@ -138,6 +161,8 @@ private:
     WBAckCallback _onAck;
     WBChildEventCallback _onChildEvent;
     WBTopicCallback _onTopic;
+    WBSysConfigCallback _onSysConfig;
+    WBSysConfigAckCallback _onSysConfigAck;
 };
 
 #endif

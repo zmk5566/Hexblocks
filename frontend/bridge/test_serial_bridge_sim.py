@@ -1,13 +1,39 @@
 """Regression tests for the interactive simulator in serial_bridge.py."""
 from __future__ import annotations
 
+import asyncio
 import pathlib
 import sys
+
+import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 import serial_bridge
 from wb_eca import CH
+
+
+@pytest.fixture(autouse=True)
+def reset_sim_globals():
+    maps = [
+        serial_bridge.sim_modules,
+        serial_bridge.sim_parents,
+        serial_bridge.sim_transport_modes,
+        serial_bridge.modules,
+        serial_bridge.module_types,
+        serial_bridge.uid_by_slot,
+        serial_bridge.slot_by_uid,
+        serial_bridge.modules_by_uid,
+        serial_bridge.module_types_by_uid,
+        serial_bridge.msg_cache_by_uid,
+        serial_bridge.link_cache_by_uid,
+        serial_bridge.actuator_cache_by_uid,
+    ]
+    for mapping in maps:
+        mapping.clear()
+    yield
+    for mapping in maps:
+        mapping.clear()
 
 
 def test_light_sim_payload_uses_light_field(monkeypatch):
@@ -30,3 +56,64 @@ def test_non_imu_sim_payloads_use_catalog_labels(monkeypatch):
         "celsius": CH.CELSIUS,
         "humidity": CH.HUMIDITY,
     }
+
+
+@pytest.mark.asyncio
+async def test_sim_wireless_info_and_config(monkeypatch):
+    events = []
+
+    async def fake_broadcast(msg):
+        events.append(msg)
+
+    monkeypatch.setattr(serial_bridge, "broadcast", fake_broadcast)
+    mod = serial_bridge.SimModule("imu")
+    serial_bridge.sim_modules[mod.slot] = mod
+    serial_bridge.sim_transport_modes[mod.uid] = serial_bridge.SIM_DEFAULT_TRANSPORT_MODE
+
+    await serial_bridge._emit_sim_wireless_info()
+
+    assert events[0] == {
+        "type": "wifi_ap",
+        "ssid": serial_bridge.SIM_WIFI_SSID,
+        "ip": serial_bridge.SIM_WIFI_IP,
+        "port": serial_bridge.SIM_WIFI_PORT,
+    }
+    link = [e for e in events if e["type"] == "link_state"][0]
+    assert link["uid"] == mod.uid
+    assert link["active_link"] == "can"
+    assert link["transport_mode"] == serial_bridge.SIM_DEFAULT_TRANSPORT_MODE
+
+    events.clear()
+    serial_bridge._parse_sim_command(f"$W,CONFIG {mod.uid} wifi_only")
+    await asyncio.sleep(0)
+
+    assert serial_bridge.sim_transport_modes[mod.uid] == "wifi_only"
+    link = [e for e in events if e["type"] == "link_state"][0]
+    assert link["active_link"] == "wifi"
+    assert link["ip"] == f"192.168.4.{100 + mod.slot}"
+
+
+@pytest.mark.asyncio
+async def test_sim_remote_module_reports_remote_wifi(monkeypatch):
+    events = []
+
+    async def fake_broadcast(msg):
+        events.append(msg)
+
+    monkeypatch.setattr(serial_bridge, "broadcast", fake_broadcast)
+    mod = serial_bridge.SimModule("remote_temp")
+    serial_bridge.sim_modules[mod.slot] = mod
+    serial_bridge.sim_transport_modes[mod.uid] = "wifi_only"
+
+    await serial_bridge._emit_sim_topology()
+    topo = [e for e in events if e["type"] == "topology"][0]
+    assert topo["uid"] == mod.uid
+    assert topo["parent_is_hub"] is False
+    assert topo["parent_remote"] is True
+    assert topo["parent_face"] == 0
+
+    events.clear()
+    await serial_bridge._emit_sim_link_state(mod.uid)
+    link = [e for e in events if e["type"] == "link_state"][0]
+    assert link["active_link"] == "wifi"
+    assert link["topology_state"] == "remote_unplaced"

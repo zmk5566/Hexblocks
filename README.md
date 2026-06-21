@@ -34,11 +34,13 @@ The core design goal is semantic continuity: physical modules, authoring referen
 
 ```
 hardware/             ESP32-C3 firmware (hub + 6 module types) and PCB
-  firmware/hub/       hub.ino, ModuleRegistry — CAN master, BLE/USB companion link
+  firmware/hub/       hub.ino, ModuleRegistry — CAN master, BLE/USB link,
+                      Wi-Fi/OSC fallback host
   firmware/module_*/  per-module sketches (imu, led, vibration,
                       amplifier, light_resistor, resistor)
   firmware/lib/       shared C++ libraries: WearBlocksCAN, *Protocol,
-                      *Descriptor, *Module, *ECA (bytecode interpreter)
+                      *Descriptor, *Module, *ECA (bytecode interpreter),
+                      *Wireless (Wi-Fi/OSC transport helpers)
   pcb/                board files
 schematics/           KiCad project (board + schematic)
 openscad-model/       hex enclosure SCAD sources + exported STL

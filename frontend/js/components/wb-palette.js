@@ -4,10 +4,12 @@
  * Displays discovered hardware modules as cards.
  */
 import { LitElement, html, css } from 'lit';
+import { wsClient } from '../ws-client.js';
 
 export class WbPalette extends LitElement {
   static properties = {
     modules: { type: Array },
+    wifiInfo: { type: Object },
   };
 
   static styles = css`
@@ -100,7 +102,12 @@ export class WbPalette extends LitElement {
       box-shadow: 0 0 6px rgba(152, 152, 152, 0.6);
       flex-shrink: 0;
     }
-    .hub-text { display: flex; flex-direction: column; }
+    .hub-text {
+      display: flex;
+      flex: 1;
+      flex-direction: column;
+      min-width: 0;
+    }
     .hub-name {
       font-size: 0.85rem;
       font-weight: 600;
@@ -111,15 +118,57 @@ export class WbPalette extends LitElement {
       color: var(--wb-text-dim);
       font-family: var(--wb-mono);
     }
+    .hub-wifi {
+      font-size: 0.64rem;
+      color: var(--wb-text-dim);
+      font-family: var(--wb-mono);
+      margin-top: 2px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .hub-info-btn {
+      margin-left: auto;
+      padding: 3px 7px;
+      border: 1px solid var(--wb-border);
+      border-radius: 0;
+      background: transparent;
+      color: var(--wb-text-dim);
+      font-size: 0.65rem;
+      cursor: pointer;
+    }
+    .hub-info-btn:hover {
+      background: var(--wb-accent);
+      color: var(--wb-bg);
+      border-color: var(--wb-accent);
+    }
   `;
 
   constructor() {
     super();
     this.modules = [];
+    this.wifiInfo = {};
+  }
+
+  _openHubInfo(e) {
+    e.stopPropagation();
+    wsClient.wirelessInfo();
+    this.dispatchEvent(new CustomEvent('open-config', {
+      detail: { targetType: 'hub' },
+      bubbles: true,
+      composed: true,
+    }));
   }
 
   render() {
     const count = this.modules.length;
+    const wifi = this.wifiInfo || {};
+    const wifiMeta = wifi.ssid
+      ? `${wifi.ssid} · ${wifi.ip || '0.0.0.0'}:${wifi.port || 0}`
+      : 'Wi-Fi AP pending';
+    const wifiTitle = wifi.password
+      ? `Wi-Fi password: ${wifi.password}${wifi.token ? `\nOSC token: ${wifi.token}` : ''}`
+      : 'Request hub Wi-Fi details';
 
     return html`
       <div class="header">
@@ -131,7 +180,11 @@ export class WbPalette extends LitElement {
         <div class="hub-text">
           <span class="hub-name">Hub</span>
           <span class="hub-meta">ECA engine · ${count} module${count === 1 ? '' : 's'}</span>
+          <span class="hub-wifi" title=${wifiTitle}>${wifiMeta}</span>
         </div>
+        <button class="hub-info-btn"
+                title="Open hub info and configuration"
+                @click=${this._openHubInfo}>info</button>
       </div>
       ${count === 0
         ? html`
@@ -147,12 +200,16 @@ export class WbPalette extends LitElement {
                 .uid=${m.uid}
                 .slot=${m.slot ?? null}
                 .parent=${m.parent_is_hub === false ? (m.parent_uid ?? '') : 'HUB'}
+                .parentRemote=${!!m.parent_remote || m.topology_state === 'remote_unplaced'}
                 .parentFace=${m.parent_face ?? 0}
                 .color=${m.color}
                 .name=${m.name}
                 .capabilities=${m.capabilities || []}
                 .firmwareVersion=${m.firmware_version || ''}
                 .fwHash=${m.fw_hash || ''}
+                .activeLink=${m.active_link || ''}
+                .transportMode=${m.transport_mode || ''}
+                .topologyState=${m.topology_state || ''}
                 .active=${m.active !== false}>
               </wb-module-card>
             `)}

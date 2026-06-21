@@ -27,20 +27,20 @@ Wire grammar (v2):
 import json
 
 
-def _parse_parent(label: str) -> tuple[str | None, bool]:
+def _parse_parent(label: str) -> tuple[str | None, bool, bool]:
     """Interpret a $H/$F/$T parentLabel token.
 
-    Returns (parent_uid, is_hub). parent_uid is None when parent is the
-    hub (in which case is_hub=True). An empty label (e.g. orphan $H with
-    no attach signal yet) returns (None, False) so callers can
-    distinguish "attached to hub" from "parent unknown".
+    Returns (parent_uid, is_hub, is_remote). parent_uid is None when
+    parent is the hub or a remote/unplaced wireless node.
     """
     label = (label or "").strip()
     if not label:
-        return None, False
+        return None, False, False
     if label == "HUB":
-        return None, True
-    return label, False
+        return None, True, False
+    if label == "REMOTE":
+        return None, False, True
+    return label, False, False
 
 
 def parse_line(raw: str) -> dict | None:
@@ -75,13 +75,14 @@ def parse_line(raw: str) -> dict | None:
             parent_face = int(parent_face_s)
         except ValueError:
             return None
-        parent_uid, parent_is_hub = _parse_parent(parent_label)
+        parent_uid, parent_is_hub, parent_remote = _parse_parent(parent_label)
         return {
             "type": "hello",
             "uid": uid,
             "id": mod_id,
             "parent_uid": parent_uid,
             "parent_is_hub": parent_is_hub,
+            "parent_remote": parent_remote,
             "parent_face": parent_face,
         }
 
@@ -151,16 +152,18 @@ def parse_line(raw: str) -> dict | None:
             new_face = int(parts[5])
         except ValueError:
             return None
-        old_parent_uid, old_is_hub = _parse_parent(parts[2])
-        new_parent_uid, new_is_hub = _parse_parent(parts[4])
+        old_parent_uid, old_is_hub, old_remote = _parse_parent(parts[2])
+        new_parent_uid, new_is_hub, new_remote = _parse_parent(parts[4])
         return {
             "type": "face_swap",
             "uid": parts[1],
             "old_parent_uid": old_parent_uid,
             "old_parent_is_hub": old_is_hub,
+            "old_parent_remote": old_remote,
             "old_face": old_face,
             "new_parent_uid": new_parent_uid,
             "new_parent_is_hub": new_is_hub,
+            "new_parent_remote": new_remote,
             "new_face": new_face,
         }
 
@@ -192,14 +195,53 @@ def parse_line(raw: str) -> dict | None:
             parent_face = int(parts[3])
         except ValueError:
             return None
-        parent_uid, parent_is_hub = _parse_parent(parts[2])
+        parent_uid, parent_is_hub, parent_remote = _parse_parent(parts[2])
         return {
             "type": "topology",
             "uid": parts[1],
             "parent_uid": parent_uid,
             "parent_is_hub": parent_is_hub,
+            "parent_remote": parent_remote,
             "parent_face": parent_face,
         }
+
+    if tag == "W":
+        # $W,<uid>,<activeLink>,<transportMode>,<topologyState>,<ip>,<port>
+        parts = line[1:].split(",", 6)
+        if len(parts) < 7:
+            return None
+        try:
+            port = int(parts[6]) if parts[6] else 0
+        except ValueError:
+            return None
+        return {
+            "type": "link_state",
+            "uid": parts[1],
+            "active_link": parts[2],
+            "transport_mode": parts[3],
+            "topology_state": parts[4],
+            "ip": parts[5],
+            "port": port,
+        }
+
+    if tag == "WIFI":
+        parts = line[1:].split(",", 4)
+        if len(parts) >= 4 and parts[1] == "AP":
+            try:
+                port = int(parts[4]) if len(parts) >= 5 else 0
+            except ValueError:
+                return None
+            return {
+                "type": "wifi_ap",
+                "ssid": parts[2],
+                "ip": parts[3],
+                "port": port,
+            }
+        if len(parts) >= 3 and parts[1] == "TOKEN":
+            return {"type": "wifi_token", "token": parts[2]}
+        if len(parts) >= 3 and parts[1] == "PASS":
+            return {"type": "wifi_pass", "password": parts[2]}
+        return None
 
     if tag == "Q":
         parts = line[1:].split(",", 1)
@@ -243,6 +285,7 @@ def _selftest() -> None:
     h = parse_line("$H,A1B2C3D4,imuv2,HUB,1")
     assert h == {"type": "hello", "uid": "A1B2C3D4", "id": "imuv2",
                  "parent_uid": None, "parent_is_hub": True,
+                 "parent_remote": False,
                  "parent_face": 1}, h
 
     h2 = parse_line("$H,A1B2C3D4,,HUB,1")
@@ -292,6 +335,19 @@ def _selftest() -> None:
     assert parse_line("$ERR bad_uid") == {
         "type": "command_ack", "status": "err", "text": "bad_uid"}
     assert parse_line("$Q,DONE") == {"type": "query_done"}
+
+    rh = parse_line("$H,FACE0001,imuv2,REMOTE,0")
+    assert rh["parent_remote"] and rh["parent_uid"] is None and not rh["parent_is_hub"], rh
+
+    w = parse_line("$W,FACE0001,wifi,wifi_only,remote_unplaced,192.168.4.2,9000")
+    assert (w["type"] == "link_state" and w["active_link"] == "wifi"
+            and w["transport_mode"] == "wifi_only" and w["port"] == 9000), w
+
+    ap = parse_line("$WIFI,AP,HEX-1234,192.168.4.1,9000")
+    assert ap == {"type": "wifi_ap", "ssid": "HEX-1234",
+                  "ip": "192.168.4.1", "port": 9000}, ap
+    pw = parse_line("$WIFI,PASS,hex-ABCDEF0123456789")
+    assert pw == {"type": "wifi_pass", "password": "hex-ABCDEF0123456789"}, pw
 
     e = parse_line("$E,1,1,3,2,128,1")
     assert (e["type"] == "eca_status" and e["running"] and e["has_program"]

@@ -221,15 +221,12 @@ struct WBRule {
 #define WB_ECA_MAX_RULES 16
 #define WB_ECA_MAX_VCS   8
 #define WB_ECA_MAX_VARS  8
-#define WB_ECA_MAX_SLOTS 7   // ECA register cap: slots 1-6 are addressable in
-                             // the runtime, index 0 unused. This is *separate*
-                             // from ModuleRegistry's broader slot range
-                             // (1..WB_MAX_MODULES, currently 11) used for
-                             // descriptor/topology bookkeeping; only the first
-                             // 6 registry slots are reachable from rule
-                             // bytecode. Bumping this widens the per-slot
-                             // cache arrays below and the bitmap in
-                             // autoEnableTopics; check both before changing.
+#define WB_ECA_MAX_SLOTS 12  // ECA cache cap: registry slots 1-11 are
+                             // addressable; index 0 is the unavailable
+                             // sentinel. This mirrors ModuleRegistry's
+                             // WB_MAX_MODULES without including hub headers.
+                             // Bumping this widens the per-slot cache arrays
+                             // and the bitmap in autoEnableTopics.
 #define WB_ECA_MAGIC_0   0x57
 #define WB_ECA_MAGIC_1   0x42
 #define WB_ECA_VERSION   0x03
@@ -246,10 +243,16 @@ public:
     // (b) target actuator commands at the correct CAN slot, and (c) enable
     // topics on the right module. Without it, all SLOT refs resolve to 0.
     typedef uint8_t (*UidToSlotFn)(uint32_t uid);
+    typedef bool (*ActuatorDispatchFn)(uint8_t slot, uint32_t uid, uint8_t cmd,
+                                       const uint8_t* params, uint8_t paramLen);
+    typedef bool (*TopicDispatchFn)(uint8_t slot, uint32_t uid, uint8_t channelId,
+                                    bool enable);
 
     WearBlocksECA();
     void begin(WearBlocksProtocol& proto);
     void setUidResolver(UidToSlotFn fn) { _uidToSlot = fn; }
+    void setActuatorDispatcher(ActuatorDispatchFn fn) { _actuatorDispatch = fn; }
+    void setTopicDispatcher(TopicDispatchFn fn) { _topicDispatch = fn; }
 
     // Program management
     bool loadProgram(const uint8_t* data, uint16_t len);
@@ -310,12 +313,17 @@ private:
     float computeVC(uint8_t vc_id);
     bool  evaluateConditions(const WBRule& rule, uint8_t rule_idx, uint32_t now);
     void  executeAction(const WBAction& act);
+    bool  dispatchActuator(uint8_t slot, uint32_t uid, uint8_t cmd,
+                           const uint8_t* params, uint8_t paramLen);
+    bool  dispatchTopic(uint8_t slot, uint32_t uid, uint8_t channelId, bool enable);
     bool  ruleNeedsContinuousUpdates(const WBRule& rule) const;
     void  clearTransientEvents();
 
     UidToSlotFn _uidToSlot;
+    ActuatorDispatchFn _actuatorDispatch;
+    TopicDispatchFn _topicDispatch;
 
-    // Sensor cache: [slot 1-6][channel_id 0-47]
+    // Sensor cache: [slot 1-11][channel_id 0-47]
     float    _cache[WB_ECA_MAX_SLOTS][WB_CH_MAX];
     float    _prevCache[WB_ECA_MAX_SLOTS][WB_CH_MAX]; // for DIFF
     bool     _eventFresh[WB_ECA_MAX_SLOTS][WB_CH_MAX];

@@ -64,11 +64,12 @@ virtual channels, topic extraction, run/stop/clear lifecycle.
    ```
    [bridge] HTTP serving ... on :3000
    [bridge] WebSocket on :8765
-     [sim] demo: 5 modules connected, HR stacked on IMU F4
+     [sim] demo: 5 CAN modules + 2 remote Wi-Fi modules, light stacked on IMU F4
    ```
 
-2. **Open the UI**: `http://localhost:3000`. You should see 5 modules on
-   the hub, HR stacked on IMU's F4, LED module on one of the hub faces.
+2. **Open the UI**: `http://localhost:3000`. You should see 5 CAN modules,
+   2 remote Wi-Fi modules, light stacked on IMU's F4, and an LED module on
+   one of the hub faces.
    The right pane is the **ECA Rules** Blockly workspace (default 320 px
    wide — drag the `⸽` divider on its left edge to widen).
 

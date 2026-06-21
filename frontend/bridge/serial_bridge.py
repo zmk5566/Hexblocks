@@ -9,7 +9,7 @@ Usage:
   python serial_bridge.py --sim                    # interactive multi-module simulator
   python serial_bridge.py --sim-demo               # auto-load demo (HR stacked on IMU)
 """
-import argparse, asyncio, base64, json, math, os, random, re, sys, time, threading
+import argparse, asyncio, base64, copy, json, math, os, random, re, sys, time, threading
 from collections import deque
 from datetime import datetime
 from functools import partial
@@ -215,6 +215,7 @@ clients: set = set()
 modules_by_uid: dict = {}           # uid → mod_id
 module_types_by_uid: dict = {}      # uid → sensor type shorthand
 msg_cache_by_uid: dict = {}         # uid → {"hello": msg, "descriptor": msg}
+link_cache_by_uid: dict = {}        # uid → latest link_state msg
 # Stack relationships keyed by parent UID + face.
 stack_cache_by_uid: dict = {}       # (parent_uid, parent_face) → child_stack msg
 # Latest actuator state per uid (LED + vib).
@@ -227,6 +228,13 @@ actuator_cache_by_uid: dict = {}    # uid → actuator_state msg
 QUERY_DONE_COMMANDS = {"STATUS", "TOPO", "ECA"}
 pending_query_done_commands: deque[str] = deque()
 topo_snapshot_uids: set[str] = set()
+WIRELESS_TRANSPORT_MODES = {
+    "can_only",
+    "wifi_only",
+    "can_primary_wifi_fallback",
+    "wifi_primary_can_fallback",
+    "dual_send_debug",
+}
 
 # Side indexes for sim / ECA dispatch — slot is CAN-bus addressing concept,
 # not exposed on the v2 wire. Populated by sim in commit 3.
@@ -411,13 +419,15 @@ def _consume_tracked_query_done(command: str) -> None:
 def _prune_uid_caches_to(live_uids: set[str]) -> None:
     """Drop bridge replay caches for UIDs absent from an authoritative TOPO."""
     cached_uids = (set(modules_by_uid) | set(module_types_by_uid)
-                   | set(msg_cache_by_uid) | set(actuator_cache_by_uid)
+                   | set(msg_cache_by_uid) | set(link_cache_by_uid)
+                   | set(actuator_cache_by_uid)
                    | set(slot_by_uid))
     dead_uids = cached_uids - live_uids
     for uid in dead_uids:
         modules_by_uid.pop(uid, None)
         module_types_by_uid.pop(uid, None)
         msg_cache_by_uid.pop(uid, None)
+        link_cache_by_uid.pop(uid, None)
         actuator_cache_by_uid.pop(uid, None)
         slot = slot_by_uid.pop(uid, None)
         if slot is not None:
@@ -464,6 +474,11 @@ def parse_line(raw: str):
         # window between cache replay and TOPO reconcile, which looks
         # exactly like an orphan module.
         msg["face"] = msg["parent_face"] if msg["parent_is_hub"] else 0
+        cached_link = link_cache_by_uid.get(uid)
+        if cached_link:
+            msg["active_link"] = cached_link.get("active_link")
+            msg["transport_mode"] = cached_link.get("transport_mode")
+            msg["topology_state"] = cached_link.get("topology_state")
         return msg
 
     if mtype == "descriptor":
@@ -537,6 +552,17 @@ def parse_line(raw: str):
         topo_snapshot_uids.add(msg["uid"])
         return msg
 
+    if mtype == "link_state":
+        uid = msg["uid"]
+        msg["slot"] = slot_by_uid.get(uid)
+        link_cache_by_uid[uid] = dict(msg)
+        cached = msg_cache_by_uid.get(uid, {}).get("hello")
+        if cached:
+            cached["active_link"] = msg.get("active_link")
+            cached["transport_mode"] = msg.get("transport_mode")
+            cached["topology_state"] = msg.get("topology_state")
+        return msg
+
     if mtype == "query_done":
         cmd = pending_query_done_commands.popleft() if pending_query_done_commands else None
         # Back-compat for manually typed `$Q,TOPO` on the serial console or old
@@ -551,7 +577,8 @@ def parse_line(raw: str):
         topo_snapshot_uids.clear()
         return msg
 
-    # child_stack, child_unstack, command_ack: pass through unchanged.
+    # child_stack, child_unstack, command_ack, wifi_ap/pass/token:
+    # pass through unchanged.
     return msg
 
 
@@ -596,6 +623,9 @@ def cache_msg(msg: dict):
             msg_cache_by_uid.setdefault(uid, {})["descriptor"] = msg
         elif mtype == "module_info":
             msg_cache_by_uid.setdefault(uid, {})["module_info"] = msg
+        elif mtype == "link_state":
+            msg_cache_by_uid.setdefault(uid, {})["link_state"] = msg
+            link_cache_by_uid[uid] = dict(msg)
         elif mtype == "actuator_state":
             actuator_cache_by_uid[uid] = msg
         return
@@ -614,7 +644,7 @@ def cache_msg(msg: dict):
 
 
 async def broadcast(msg: dict):
-    if msg["type"] in ("hello", "descriptor", "module_info", "child_stack",
+    if msg["type"] in ("hello", "descriptor", "module_info", "link_state", "child_stack",
                        "child_unstack", "actuator_state"):
         try:
             cache_msg(msg)
@@ -759,6 +789,8 @@ async def ws_handler(ws):
             await ws.send(json.dumps(cached["hello"]))
         if "module_info" in cached:
             await ws.send(json.dumps(cached["module_info"]))
+        if "link_state" in cached:
+            await ws.send(json.dumps(cached["link_state"]))
         if "descriptor" in cached:
             await ws.send(json.dumps(cached["descriptor"]))
     for stack_msg in stack_cache_by_uid.values():
@@ -832,6 +864,24 @@ async def ws_handler(ws):
                     target = _resolve_target(inbound)
                     if target is None: continue
                     await serial_write_queue.put(f"$TA {target}\n")
+                elif action == "wireless_info":
+                    await serial_write_queue.put("$W,INFO\n")
+                    print("[bridge] WS→serial: $W,INFO")
+                elif action == "wireless_config":
+                    mode = str(inbound.get("mode", "")).strip()
+                    if mode not in WIRELESS_TRANSPORT_MODES:
+                        print(f"[bridge] wireless_config: bad mode {mode!r}")
+                        continue
+                    target = str(inbound.get("target", "")).strip().upper()
+                    if target != "ALL":
+                        resolved = _resolve_target(inbound)
+                        target = str(resolved).strip().upper() if resolved else target
+                    if target != "ALL" and not re.fullmatch(r"[0-9A-F]{8}", target):
+                        print(f"[bridge] wireless_config: bad target {target!r}")
+                        continue
+                    line = f"$W,CONFIG {target} {mode}"
+                    await serial_write_queue.put(line + "\n")
+                    print(f"[bridge] WS→serial: {line}")
                 elif action == "sim_command":
                     # Browser-side preset buttons (D1/D2/D3, clear, etc.)
                     # in --sim modes only. Silently no-op when not in sim.
@@ -1389,6 +1439,24 @@ SIM_MODULE_DEFS = {
     },
 }
 
+SIM_MODULE_DEFS["remote_temp"] = copy.deepcopy(SIM_MODULE_DEFS["temp"])
+SIM_MODULE_DEFS["remote_temp"].update({
+    "id": "tmpw1", "slot": 8, "face": 0, "remote": True,
+    "data_type": "temp",
+})
+SIM_MODULE_DEFS["remote_temp"]["descriptor"].update({
+    "id": "tmpw1", "name": "Remote Temp/Humidity",
+})
+
+SIM_MODULE_DEFS["remote_hr"] = copy.deepcopy(SIM_MODULE_DEFS["hr"])
+SIM_MODULE_DEFS["remote_hr"].update({
+    "id": "hrw1", "slot": 9, "face": 0, "remote": True,
+    "data_type": "hr",
+})
+SIM_MODULE_DEFS["remote_hr"]["descriptor"].update({
+    "id": "hrw1", "name": "Remote Heart Rate",
+})
+
 
 def _noise(scale: float = 0.01) -> float:
     return random.gauss(0, scale)
@@ -1434,6 +1502,8 @@ class SimModule:
     def __init__(self, mod_type: str):
         defn = SIM_MODULE_DEFS[mod_type]
         self.mod_type = mod_type
+        self.data_type = defn.get("data_type", mod_type)
+        self.remote = bool(defn.get("remote", False))
         self.mod_id = defn["id"]
         self.slot = defn["slot"]
         # Stable synthetic UID per slot — matches the 8-hex-char format the
@@ -1443,7 +1513,7 @@ class SimModule:
         # Chars must be valid hex (0-9, a-f) so the ECA bytecode encoder
         # can parse uid → u32. "FACE" is the prefix; slot fills the low 16 bits.
         self.uid = f"FACE{self.slot:04X}"
-        self.face = defn["face"]
+        self.face = 0 if self.remote else defn["face"]
         self.color = defn["color"]
         self.descriptor = defn["descriptor"]
         self.hz = defn["hz"]
@@ -1469,7 +1539,8 @@ class SimModule:
             "type": "hello", "uid": self.uid,
             "id": self.mod_id, "face": self.face,
             "slot": self.slot, "color": self.color,
-            "parent_uid": None, "parent_is_hub": True,
+            "parent_uid": None, "parent_is_hub": not self.remote,
+            "parent_remote": self.remote,
             "parent_face": self.face,
         })
 
@@ -1485,13 +1556,13 @@ class SimModule:
         if self.hz <= 0 or not self.active:
             return
         t = time.time() - self.t0
-        data = sim_sensor_data(self.mod_type, t)
+        data = sim_sensor_data(self.data_type, t)
         if not data:
             return
         # Apply any one-shot spike overrides. A spike replaces the generator
         # output for a single channel until its expiry time passes.
         now_ms = int(time.time() * 1000)
-        ch_map = SIM_CHANNEL_MAP.get(self.mod_type, {})
+        ch_map = SIM_CHANNEL_MAP.get(self.data_type, {})
         if self.spikes:
             # Reverse lookup channel_id → data key so spikes can target CH.AX
             # directly regardless of the module's per-type remap.
@@ -1512,7 +1583,7 @@ class SimModule:
         for key, ch_id in ch_map.items():
             if key in data:
                 eca.update_sensor(self.slot, int(ch_id), float(data[key]))
-        sensor_type = CAT_MAP.get(self.descriptor.get("cat", ""), self.mod_type)
+        sensor_type = CAT_MAP.get(self.descriptor.get("cat", ""), self.data_type)
         # Emit one v2-shaped per-channel frame per channel in this module's
         # capability map — this is what the real hub emits on the wire. Keep
         # the legacy batched frame as a secondary broadcast during the
@@ -1537,8 +1608,15 @@ class SimModule:
 sim_modules: dict[int, SimModule] = {}  # slot → SimModule
 # Parent tracking for stacked modules:  child_slot → (parent_slot, parent_face)
 sim_parents: dict[int, tuple[int, int]] = {}
+sim_transport_modes: dict[str, str] = {}
 sim_eca_b64: str = ""
 sim_eca_raw_len: int = 0
+SIM_DEFAULT_TRANSPORT_MODE = "can_primary_wifi_fallback"
+SIM_WIFI_SSID = "HEX-SIM-HUB"
+SIM_WIFI_PASSWORD = "hex-sim-pass"
+SIM_WIFI_TOKEN = "sim-osc-token"
+SIM_WIFI_IP = "192.168.4.1"
+SIM_WIFI_PORT = 9000
 
 # Set by sim_loop() so the WS handler can inject sim commands (e.g.
 # "demo1") from the browser preset buttons.
@@ -1834,6 +1912,31 @@ def _parse_sim_command(line: str) -> None:
             else:
                 print(f"  [sim] (topic op ignored in sim) {line}")
                 asyncio.create_task(_ack(f"{op} slot={slot}"))
+        elif line == "$W,INFO":
+            asyncio.create_task(_emit_sim_wireless_info())
+        elif line.startswith("$W,CONFIG "):
+            parts = line.split()
+            if len(parts) < 3:
+                asyncio.create_task(_ack("$W,CONFIG: need target + mode", ok=False))
+                return
+            target = parts[1].strip().upper()
+            mode = parts[2].strip()
+            if mode not in WIRELESS_TRANSPORT_MODES:
+                asyncio.create_task(_ack(f"W bad_mode {mode}", ok=False))
+                return
+            if target == "ALL":
+                mods = list(sim_modules.values())
+            else:
+                slot = _resolve_sim_target(target)
+                if slot is None:
+                    asyncio.create_task(_ack(f"W bad_target {target}", ok=False))
+                    return
+                mods = [sim_modules[slot]]
+            for mod in mods:
+                sim_transport_modes[mod.uid] = mode
+                asyncio.create_task(_emit_sim_link_state(mod.uid))
+            print(f"  [sim] wireless config {target} -> {mode}")
+            asyncio.create_task(_ack(f"W CONFIG {target} {mode}"))
         elif line.startswith("$Q,") or line == "$Q":
             # $Q,TOPO / $Q,STATUS / $Q,DISCOVER — sim has no real registry
             # to replay, but TOPO matters for frontend reconciliation
@@ -1861,19 +1964,28 @@ async def _emit_sim_topology():
     sim_module, then query_done. Lets the frontend reconcile its
     _children + module.face from the sim's authoritative state."""
     for slot, mod in sorted(sim_modules.items()):
-        if slot in sim_parents:
+        if mod.remote:
+            await broadcast({
+                "type": "topology", "uid": mod.uid, "slot": slot,
+                "parent_uid": None, "parent_is_hub": False,
+                "parent_remote": True,
+                "parent_face": 0,
+            })
+        elif slot in sim_parents:
             parent_slot, parent_face = sim_parents[slot]
             parent = sim_modules.get(parent_slot)
             parent_uid = parent.uid if parent else None
             await broadcast({
                 "type": "topology", "uid": mod.uid, "slot": slot,
                 "parent_uid": parent_uid, "parent_is_hub": False,
+                "parent_remote": False,
                 "parent_face": parent_face,
             })
         else:
             await broadcast({
                 "type": "topology", "uid": mod.uid, "slot": slot,
                 "parent_uid": None, "parent_is_hub": True,
+                "parent_remote": False,
                 "parent_face": mod.face,
             })
     _consume_tracked_query_done("TOPO")
@@ -1886,6 +1998,50 @@ async def _emit_sim_query_done(cmd: str):
     _consume_tracked_query_done(command)
     await broadcast({"type": "query_done", "command": command})
     print(f"  [sim] $Q,{cmd} → DONE (no replay)")
+
+
+def _sim_active_link_for_mode(mode: str) -> str:
+    if mode == "wifi_only" or mode == "wifi_primary_can_fallback":
+        return "wifi"
+    if mode == "dual_send_debug":
+        return "dual"
+    return "can"
+
+
+async def _emit_sim_link_state(uid: str):
+    slot = slot_by_uid.get(uid)
+    mod = sim_modules.get(slot) if slot is not None else None
+    if not mod:
+        return
+    mode = sim_transport_modes.get(uid, SIM_DEFAULT_TRANSPORT_MODE)
+    active_link = _sim_active_link_for_mode(mode)
+    if mod.remote and active_link == "can":
+        active_link = "wifi"
+    ip = f"192.168.4.{100 + mod.slot}" if active_link in ("wifi", "dual") else ""
+    await broadcast({
+        "type": "link_state",
+        "uid": uid,
+        "slot": mod.slot,
+        "active_link": active_link,
+        "transport_mode": mode,
+        "topology_state": "remote_unplaced" if mod.remote else "physical",
+        "ip": ip,
+        "port": SIM_WIFI_PORT if ip else 0,
+    })
+
+
+async def _emit_sim_wireless_info():
+    await broadcast({
+        "type": "wifi_ap",
+        "ssid": SIM_WIFI_SSID,
+        "ip": SIM_WIFI_IP,
+        "port": SIM_WIFI_PORT,
+    })
+    await broadcast({"type": "wifi_pass", "password": SIM_WIFI_PASSWORD})
+    await broadcast({"type": "wifi_token", "token": SIM_WIFI_TOKEN})
+    for mod in sorted(sim_modules.values(), key=lambda m: m.slot):
+        await _emit_sim_link_state(mod.uid)
+    print(f"  [sim] $W,INFO replied: {len(sim_modules)} link rows")
 
 
 async def _emit_sim_eca_snapshot():
@@ -1926,12 +2082,15 @@ async def sim_add_module(mod_type: str):
         return
     mod = SimModule(mod_type)
     sim_modules[slot] = mod
+    sim_transport_modes[mod.uid] = "wifi_only" if mod.remote else SIM_DEFAULT_TRANSPORT_MODE
     modules[slot] = mod.mod_id
     await mod.send_hello()
     await asyncio.sleep(0.1)
     await mod.send_descriptor()
+    await _emit_sim_link_state(mod.uid)
     hz_str = f"{mod.hz} Hz" if mod.hz > 0 else "actuator (no streaming)"
-    print(f"  [sim] + {mod_type} connected → slot {slot}, face {mod.face}, {hz_str}")
+    loc = "remote" if mod.remote else f"face {mod.face}"
+    print(f"  [sim] + {mod_type} connected → slot {slot}, {loc}, {hz_str}")
 
 
 async def sim_remove_module(slot: int):
@@ -1955,7 +2114,9 @@ async def sim_remove_module(slot: int):
     modules_by_uid.pop(mod.uid, None)
     module_types_by_uid.pop(mod.uid, None)
     msg_cache_by_uid.pop(mod.uid, None)
+    link_cache_by_uid.pop(mod.uid, None)
     actuator_cache_by_uid.pop(mod.uid, None)
+    sim_transport_modes.pop(mod.uid, None)
     # Send goodbye via status update + explicit $U-style unplug so the
     # frontend drops the module from its state.
     await broadcast({"type": "unplug", "uid": mod.uid, "slot": slot})
@@ -1975,6 +2136,8 @@ def sim_print_status():
         if slot in sim_parents:
             ps, pf = sim_parents[slot]
             stack_str = f"  ⬆ on slot {ps} F{pf}"
+        if mod.remote:
+            stack_str = "  remote"
         print(f"    slot {slot}: {mod.mod_id} ({mod.mod_type}) "
               f"face={mod.face} {hz_str}{stack_str}")
 
@@ -1994,7 +2157,7 @@ def sim_print_help():
     print("  ║     Remove stack link                        ║")
     print("  ║  spike imu ax 0.8 [dur_ms]                   ║")
     print("  ║     Inject a one-shot sensor spike (ECA test)║")
-    print("  ║  demo    IMU+HR+Temp+LED+Vib, HR on IMU F4  ║")
+    print("  ║  demo    5 CAN modules + 2 remote Wi-Fi mods ║")
     print("  ║  clear   Disconnect all modules              ║")
     print("  ║  status  Show active modules + stacks        ║")
     print("  ║  help    Show this help                      ║")
@@ -2014,8 +2177,8 @@ async def sim_stdin_reader(cmd_queue: asyncio.Queue):
 
 
 async def sim_run_demo():
-    """Load real hardware modules and stack light on IMU face 4."""
-    for mt in ["imu", "light", "led", "vib", "audio"]:
+    """Load physical modules plus two remote Wi-Fi modules."""
+    for mt in ["imu", "light", "led", "vib", "audio", "remote_temp", "remote_hr"]:
         await sim_add_module(mt)
         await asyncio.sleep(0.3)
     imu_slot = _slot_for_type("imu")
@@ -2023,7 +2186,7 @@ async def sim_run_demo():
     if imu_slot is not None and light_slot is not None:
         await asyncio.sleep(0.2)
         await sim_stack(light_slot, imu_slot, parent_face=4)
-    print("  [sim] demo: 5 real hardware modules, light stacked on IMU F4")
+    print("  [sim] demo: 5 CAN modules + 2 remote Wi-Fi modules, light stacked on IMU F4")
 
 
 async def sim_clear_all():
@@ -2226,14 +2389,14 @@ async def sim_loop(auto_demo: bool = False):
     print("  ║  Multi-module, hot-plug, realistic data      ║")
     print("  ║                                              ║")
     print("  ║  Quick start:                                ��")
-    print("  ║    demo     → 5 modules, HR stacked on IMU   ║")
+    print("  ║    demo     → 5 CAN + 2 remote Wi-Fi modules ║")
     print("  ║    +imu     → connect just an IMU            ║")
     print("  ║    stack hr on imu F4                        ║")
     print("  ║    help     → see all commands                ║")
     print("  ╚══════════════════════════════════════════════╝")
     print()
     if auto_demo:
-        print("  [sim] --sim-demo: auto-loading demo (HR on IMU F4)...")
+        print("  [sim] --sim-demo: auto-loading mixed CAN/Wi-Fi demo...")
     else:
         print("  [sim] ready. type a command (or 'demo' to start):")
     print()

@@ -93,10 +93,36 @@ void ModuleRegistry::addPending(uint32_t uid, uint8_t slot, uint16_t fwHash,
     m.hasDescriptor = false;
     m.lastSeenMs = millis();
     m.pendingRetries = 0;
+    m.transportMode = WB_TRANSPORT_CAN_PRIMARY_WIFI_FALLBACK;
+    m.activeLink = WB_LINK_CAN;
+    m.topologyState = WB_TOPO_PHYSICAL;
+    m.canLastSeenMs = m.lastSeenMs;
     Serial.printf("[REG] pending: slot=%d uid=%08lX fwHash=%04X parent=%s face=%d\n",
                   slot, (unsigned long)uid, fwHash,
                   parentSlot == WB_PARENT_HUB ? "HUB" : "MOD",
                   parentFace);
+}
+
+void ModuleRegistry::addRemotePending(uint32_t uid, uint8_t slot, uint16_t fwHash,
+                                      WBTransportMode mode) {
+    if (slot >= WB_MAX_MODULES || slot == 0) return;
+    RegisteredModule& m = _modules[slot];
+    memset(&m, 0, sizeof(m));
+    m.state = MODULE_PENDING;
+    m.slot = slot;
+    m.uid = uid;
+    m.fwHash = fwHash;
+    m.parentSlot = WB_PARENT_HUB;
+    m.parentFace = 0;
+    m.hasDescriptor = false;
+    m.lastSeenMs = millis();
+    m.pendingRetries = 0;
+    m.transportMode = mode;
+    m.activeLink = WB_LINK_WIFI;
+    m.topologyState = WB_TOPO_REMOTE_UNPLACED;
+    m.wifiLastSeenMs = m.lastSeenMs;
+    Serial.printf("[REG] remote pending: slot=%d uid=%08lX fwHash=%04X mode=%s\n",
+                  slot, (unsigned long)uid, fwHash, wbTransportModeName(mode));
 }
 
 void ModuleRegistry::markDescriptorPending(uint8_t slot, uint16_t fwHash) {
@@ -135,6 +161,7 @@ bool ModuleRegistry::rebind(uint8_t slot, uint8_t newParentSlot, uint8_t newPare
     bool changed = (m.parentSlot != newParentSlot) || (m.parentFace != newParentFace);
     m.parentSlot = newParentSlot;
     m.parentFace = newParentFace;
+    m.topologyState = WB_TOPO_PHYSICAL;
     m.lastSeenMs = millis();
     if (m.state == MODULE_DETACHED) m.state = MODULE_REGISTERED;  // caller must have descriptor
     return changed;
@@ -164,6 +191,42 @@ void ModuleRegistry::removeModule(uint8_t slot) {
     Serial.printf("[REG] remove: slot=%d uid=%08lX\n",
                   slot, (unsigned long)_modules[slot].uid);
     memset(&_modules[slot], 0, sizeof(_modules[slot]));
+}
+
+bool ModuleRegistry::setTransportMode(uint8_t slot, WBTransportMode mode) {
+    if (slot >= WB_MAX_MODULES || _modules[slot].state == MODULE_EMPTY) return false;
+    _modules[slot].transportMode = mode;
+    return true;
+}
+
+bool ModuleRegistry::setActiveLink(uint8_t slot, WBActiveLink link) {
+    if (slot >= WB_MAX_MODULES || _modules[slot].state == MODULE_EMPTY) return false;
+    _modules[slot].activeLink = link;
+    return true;
+}
+
+bool ModuleRegistry::noteLinkSeen(uint8_t slot, WBActiveLink link, uint32_t now) {
+    if (slot >= WB_MAX_MODULES || _modules[slot].state == MODULE_EMPTY) return false;
+    RegisteredModule& m = _modules[slot];
+    m.lastSeenMs = now;
+    if (link == WB_LINK_CAN) m.canLastSeenMs = now;
+    if (link == WB_LINK_WIFI) m.wifiLastSeenMs = now;
+    return true;
+}
+
+bool ModuleRegistry::setWirelessEndpoint(uint8_t slot, uint32_t ip, uint16_t port) {
+    if (slot >= WB_MAX_MODULES || _modules[slot].state == MODULE_EMPTY) return false;
+    _modules[slot].wifiIp = ip;
+    _modules[slot].wifiPort = port;
+    return true;
+}
+
+bool ModuleRegistry::markRemoteUnplaced(uint8_t slot) {
+    if (slot >= WB_MAX_MODULES || _modules[slot].state == MODULE_EMPTY) return false;
+    _modules[slot].parentSlot = WB_PARENT_HUB;
+    _modules[slot].parentFace = 0;
+    _modules[slot].topologyState = WB_TOPO_REMOTE_UNPLACED;
+    return true;
 }
 
 // Leaf-first subtree walk. Repeatedly scan the array; on each pass, act
@@ -366,7 +429,7 @@ String ModuleRegistry::toJSON() const {
         jm["category"] = m.descriptor.category;
         jm["color"] = m.descriptor.color;
         if (m.parentSlot == WB_PARENT_HUB) {
-            jm["parent"] = "HUB";
+            jm["parent"] = (m.topologyState == WB_TOPO_REMOTE_UNPLACED) ? "REMOTE" : "HUB";
         } else {
             const RegisteredModule& p = _modules[m.parentSlot];
             char puid[9];
@@ -374,6 +437,9 @@ String ModuleRegistry::toJSON() const {
             jm["parent"] = puid;
         }
         jm["parentFace"] = m.parentFace;
+        jm["activeLink"] = wbActiveLinkName(m.activeLink);
+        jm["transportMode"] = wbTransportModeName(m.transportMode);
+        jm["topologyState"] = wbTopologyStateName(m.topologyState);
         if (m.parentSlot == WB_PARENT_HUB) {
             jm["location"] = faceLabelSafe(_faceLabels, m.parentFace);
         }

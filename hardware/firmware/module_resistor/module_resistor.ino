@@ -18,6 +18,7 @@
 #include <WearBlocksProtocol.h>
 #include <WearBlocksDescriptor.h>
 #include <WearBlocksModule.h>
+#include <WearBlocksWireless.h>
 #include <WearBlocksECA.h>
 
 // ── Pin assignment (ESP32-C3-MINI-1) ──────────────────────────
@@ -30,6 +31,7 @@ WearBlocksCAN        can;
 WearBlocksProtocol   protocol;
 WearBlocksDescriptor descriptor;
 WBModule             module(can, protocol, descriptor);
+WBWirelessModule     wireless(module, protocol, descriptor);
 
 static const char FW_VERSION[] = "3.0";
 
@@ -98,6 +100,7 @@ void setup() {
     Serial.printf("[KNOB] uid=%08lX\n", (unsigned long)module.uid());
 
     module.onAfterAck(onRegistered);
+    wireless.begin();
 
     // ESP32-C3 ADC: 12-bit by default (0..4095). No need for analogSetWidth.
     pinMode(KNOB_PIN, INPUT);
@@ -114,16 +117,17 @@ void setup() {
 // ── Loop ──────────────────────────────────────────────────────
 void loop() {
     module.tick();
+    wireless.tick();
 
     uint32_t now = millis();
 
-    if (module.registered() && (now - lastSendMs) >= KNOB_MIN_INTERVAL) {
+    if (wireless.runtimeReady() && (now - lastSendMs) >= KNOB_MIN_INTERVAL) {
         int raw = analogRead(KNOB_PIN);
         float norm = raw / 4095.0f;
         knobLpf = knobLpf + KNOB_LPF_ALPHA * (norm - knobLpf);
 
         if (fabsf(knobLpf - lastSentNorm) >= KNOB_DEADBAND) {
-            protocol.sendSensorChannel(WB_CH_KNOB, knobLpf);
+            wireless.sendSensorChannel(WB_CH_KNOB, knobLpf);
             lastSentNorm = knobLpf;
             lastSendMs = now;
         }

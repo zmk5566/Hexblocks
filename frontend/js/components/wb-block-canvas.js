@@ -174,6 +174,14 @@ export class WbBlockCanvas extends LitElement {
       dominant-baseline: central;
       pointer-events: none;
     }
+    .remote-label {
+      fill: var(--wb-text-dim);
+      font: 600 8px system-ui;
+      text-anchor: middle;
+      dominant-baseline: central;
+      pointer-events: none;
+      letter-spacing: 0;
+    }
 
     /* edge */
     .edge { stroke: var(--wb-edge-stroke); stroke-width: 1.5; fill: none; }
@@ -607,6 +615,29 @@ export class WbBlockCanvas extends LitElement {
     return elements;
   }
 
+  _renderRemoteModules() {
+    const remotes = (this.modules || []).filter(m =>
+      m?.topology_state === 'remote_unplaced' || m?.parent_remote);
+    if (!remotes.length) return [];
+
+    const out = [];
+    const startX = -120;
+    const startY = 118;
+    const gap = 78;
+    for (let i = 0; i < remotes.length; i++) {
+      const mod = remotes[i];
+      const x = startX + (i % 4) * gap;
+      const y = startY + Math.floor(i / 4) * 68;
+      out.push(this._renderModule(x, y, mod, 0));
+      out.push(svg`
+        <text x="${x}" y="${y + HEX_R + 11}" class="remote-label">
+          ${mod.active_link || 'remote'}
+        </text>
+      `);
+    }
+    return out;
+  }
+
   /** Draw a P/R kind badge at the midpoint of each hub face edge. */
   _renderHubKindBadges() {
     const out = [];
@@ -820,6 +851,7 @@ export class WbBlockCanvas extends LitElement {
           <g style="transform: ${transform}; transform-origin: center;">
             ${this._renderBgPattern()}
             ${this._renderFaces()}
+            ${this._renderRemoteModules()}
             ${this._renderHub()}
           </g>
         </svg>

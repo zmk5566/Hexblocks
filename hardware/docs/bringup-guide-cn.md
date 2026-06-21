@@ -12,7 +12,7 @@
 |---|---|---|
 | Hub | `hardware/firmware/hub/hub.ino` | ESP32-C3-MINI-1 |
 
-烧录前安装的 lib：把 `hardware/firmware/lib/` 下的 `WearBlocksCAN`、`WearBlocksProtocol`、`WearBlocksDescriptor`、`WearBlocksModule`、`WearBlocksECA`、`WearBlocksPosID` 软链或拷到 Arduino libraries 目录。
+烧录前安装的 lib：把 `hardware/firmware/lib/` 下的 `WearBlocksCAN`、`WearBlocksProtocol`、`WearBlocksDescriptor`、`WearBlocksModule`、`WearBlocksECA`、`WearBlocksPosID`、`WearBlocksWireless` 软链或拷到 Arduino libraries 目录。
 
 ### 0.2 烧录模块固件
 
