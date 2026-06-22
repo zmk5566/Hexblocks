@@ -28,6 +28,10 @@ def reset_sim_globals():
         serial_bridge.msg_cache_by_uid,
         serial_bridge.link_cache_by_uid,
         serial_bridge.actuator_cache_by_uid,
+        serial_bridge.logger_status_by_uid,
+        serial_bridge.logger_config_by_uid,
+        serial_bridge.sim_logger_profiles,
+        serial_bridge.sim_logger_status,
     ]
     for mapping in maps:
         mapping.clear()
@@ -117,3 +121,46 @@ async def test_sim_remote_module_reports_remote_wifi(monkeypatch):
     link = [e for e in events if e["type"] == "link_state"][0]
     assert link["active_link"] == "wifi"
     assert link["topology_state"] == "remote_unplaced"
+
+
+@pytest.mark.asyncio
+async def test_sim_logger_config_filters_selected_topics(monkeypatch):
+    events = []
+
+    async def fake_broadcast(msg):
+        events.append(msg)
+
+    monkeypatch.setattr(serial_bridge, "broadcast", fake_broadcast)
+    src = serial_bridge.SimModule("light")
+    logger = serial_bridge.SimModule("loralog")
+    serial_bridge.sim_modules[src.slot] = src
+    serial_bridge.sim_modules[logger.slot] = logger
+    serial_bridge.modules_by_uid[src.uid] = src.mod_id
+    serial_bridge.modules_by_uid[logger.uid] = logger.mod_id
+    serial_bridge.msg_cache_by_uid[logger.uid] = {
+        "descriptor": {"data": logger.descriptor}
+    }
+
+    b64, decoded = serial_bridge.encode_profile_base64([{
+        "source_uid": src.uid,
+        "channel_id": CH.LIGHT,
+        "record_type": "sensor",
+        "mode": "latest_interval",
+        "min_interval_ms": 0,
+        "threshold": 0,
+    }], config_rev=7)
+    serial_bridge._parse_sim_command(f"$L,CONFIG {logger.uid} {b64}")
+    await asyncio.sleep(0)
+
+    assert serial_bridge.sim_logger_profiles[logger.uid]["config_rev"] == 7
+    await serial_bridge._sim_logger_consume_sensor(src.uid, CH.LIGHT, 0.42, 1000)
+    await serial_bridge._sim_logger_consume_sensor(src.uid, CH.AX, 0.99, 1001)
+
+    statuses = [e for e in events if e["type"] == "logger_status"]
+    assert statuses[-1]["uid"] == logger.uid
+    assert statuses[-1]["queue_depth"] == 1
+
+    await serial_bridge._sim_logger_ack_tick(2000)
+    statuses = [e for e in events if e["type"] == "logger_status"]
+    assert statuses[-1]["queue_depth"] == 0
+    assert statuses[-1]["last_ack_ms"] == 2000

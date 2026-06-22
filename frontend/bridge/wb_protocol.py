@@ -18,6 +18,8 @@ Wire grammar (v2):
   $C,<parentUid>,<childUid|PENDING>,<parentFace>
   $c,<parentUid>,<childUid|PENDING>,<parentFace>
   $T,<uid>,<parentLabel>,<parentFace>
+  $W,<uid>,<activeLink>,<transportMode>,<topologyState>,<ip>,<port>
+  $L,<uid>,<queueDepth>,<dropped>,<lastAckMs>,<rssi>,<snr>,<timeQuality>,<configRev>
   $Q,DONE
   $OK <text>     (space-separated, not comma)
   $ERR <text>    (space-separated, not comma)
@@ -224,6 +226,26 @@ def parse_line(raw: str) -> dict | None:
             "port": port,
         }
 
+    if tag == "L":
+        # $L,<uid>,<queueDepth>,<dropped>,<lastAckMs>,<rssi>,<snr>,<timeQuality>,<configRev>
+        parts = line[1:].split(",")
+        if len(parts) < 9:
+            return None
+        try:
+            return {
+                "type": "logger_status",
+                "uid": parts[1],
+                "queue_depth": int(parts[2]),
+                "dropped_count": int(parts[3]),
+                "last_ack_ms": int(parts[4]),
+                "rssi": float(parts[5]),
+                "snr": float(parts[6]),
+                "time_quality": int(parts[7]),
+                "config_rev": int(parts[8]),
+            }
+        except ValueError:
+            return None
+
     if tag == "WIFI":
         parts = line[1:].split(",", 4)
         if len(parts) >= 4 and parts[1] == "AP":
@@ -342,6 +364,13 @@ def _selftest() -> None:
     w = parse_line("$W,FACE0001,wifi,wifi_only,remote_unplaced,192.168.4.2,9000")
     assert (w["type"] == "link_state" and w["active_link"] == "wifi"
             and w["transport_mode"] == "wifi_only" and w["port"] == 9000), w
+
+    lg = parse_line("$L,FACE0010,2,1,12345,-92,7.5,1,42")
+    assert (lg["type"] == "logger_status" and lg["uid"] == "FACE0010"
+            and lg["queue_depth"] == 2 and lg["dropped_count"] == 1
+            and lg["last_ack_ms"] == 12345 and lg["rssi"] == -92.0
+            and lg["snr"] == 7.5 and lg["time_quality"] == 1
+            and lg["config_rev"] == 42), lg
 
     ap = parse_line("$WIFI,AP,HEX-1234,192.168.4.1,9000")
     assert ap == {"type": "wifi_ap", "ssid": "HEX-1234",

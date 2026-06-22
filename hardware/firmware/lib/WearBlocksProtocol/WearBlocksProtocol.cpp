@@ -12,9 +12,11 @@ WearBlocksProtocol::WearBlocksProtocol()
       _onActuatorCfg(nullptr),
       _onDescriptor(nullptr), _onDescriptorReq(nullptr), _onAck(nullptr),
       _onChildEvent(nullptr), _onTopic(nullptr),
-      _onSysConfig(nullptr), _onSysConfigAck(nullptr) {
+      _onSysConfig(nullptr), _onSysConfigAck(nullptr),
+      _onLoggerRecord(nullptr), _onSlotUidMap(nullptr) {
     for (uint8_t i = 0; i < WB_DESC_SESSIONS; i++) _descSessions[i] = {};
     _sysConfigSession = {};
+    _loggerRecordSession = {};
 }
 
 void WearBlocksProtocol::begin(WearBlocksCAN& can, bool isHub, uint8_t moduleSlot) {
@@ -205,6 +207,37 @@ bool WearBlocksProtocol::sendSysConfig(uint8_t moduleSlot, const uint8_t* payloa
     return true;
 }
 
+bool WearBlocksProtocol::sendLoggerRecord(uint8_t loggerSlot, uint32_t sourceUid,
+                                          uint8_t channelId, uint8_t recordType,
+                                          uint8_t flags, float value) {
+    if (!_isHub || loggerSlot == 0) return false;
+    static uint8_t seq = 1;
+    uint8_t s = seq;
+    seq = (uint8_t)(seq + 1);
+    if (seq == 0) seq = 1;
+    uint8_t valueBytes[4];
+    memcpy(valueBytes, &value, sizeof(valueBytes));
+
+    uint8_t frame0[8] = {
+        loggerSlot, s, 0, recordType, channelId, flags,
+        (uint8_t)(sourceUid & 0xFF),
+        (uint8_t)((sourceUid >> 8) & 0xFF),
+    };
+    uint8_t frame1[8] = {
+        loggerSlot, s, 1,
+        (uint8_t)((sourceUid >> 16) & 0xFF),
+        (uint8_t)((sourceUid >> 24) & 0xFF),
+        valueBytes[0], valueBytes[1], valueBytes[2],
+    };
+    uint8_t frame2[4] = {loggerSlot, s, 2, valueBytes[3]};
+
+    if (!_can->send(WB_MSG_LOG_RECORD, frame0, sizeof(frame0))) return false;
+    delay(1);
+    if (!_can->send(WB_MSG_LOG_RECORD, frame1, sizeof(frame1))) return false;
+    delay(1);
+    return _can->send(WB_MSG_LOG_RECORD, frame2, sizeof(frame2));
+}
+
 // --- Topic control ---
 
 void WearBlocksProtocol::sendTopicEnable(uint8_t moduleSlot, uint8_t channelId) {
@@ -350,10 +383,13 @@ void WearBlocksProtocol::handleMessage(uint32_t canId, const uint8_t* data, uint
     }
 
     // ACK (module receives) — caller compares uid in the callback to filter.
-    if (canId == WB_MSG_ACK && _onAck && !_isHub && len >= sizeof(AckMessage)) {
+    if (canId == WB_MSG_ACK && !_isHub && len >= sizeof(AckMessage)) {
         AckMessage msg;
         memcpy(&msg, data, sizeof(msg));
-        _onAck(msg.assignedSlot, msg.uid, msg.descriptorCached != 0);
+        if (_onSlotUidMap && msg.assignedSlot != 0) {
+            _onSlotUidMap(msg.assignedSlot, msg.uid);
+        }
+        if (_onAck) _onAck(msg.assignedSlot, msg.uid, msg.descriptorCached != 0);
         return;
     }
 
@@ -419,6 +455,53 @@ void WearBlocksProtocol::handleMessage(uint32_t canId, const uint8_t* data, uint
         return;
     }
 
+    // LOG_RECORD (logger module receives; target slot + 3 short chunks).
+    if (canId == WB_MSG_LOG_RECORD && !_isHub && _onLoggerRecord && len >= 3) {
+        uint8_t targetSlot = data[0];
+        uint8_t seq = data[1];
+        uint8_t chunk = data[2];
+        if (targetSlot != _moduleSlot || _moduleSlot == 0) return;
+
+        LoggerRecordSession& s = _loggerRecordSession;
+        if (chunk == 0) {
+            if (len < 8) return;
+            s = {};
+            s.active = true;
+            s.seq = seq;
+            s.recordType = data[3];
+            s.channelId = data[4];
+            s.flags = data[5];
+            s.sourceUid = (uint32_t)data[6] | ((uint32_t)data[7] << 8);
+            s.receivedMask = 0x01;
+            s.lastChunkMs = millis();
+            return;
+        }
+        if (!s.active || s.seq != seq) return;
+        s.lastChunkMs = millis();
+        if (chunk == 1) {
+            if (len < 8) return;
+            s.sourceUid |= ((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 24);
+            s.valueBytes[0] = data[5];
+            s.valueBytes[1] = data[6];
+            s.valueBytes[2] = data[7];
+            s.receivedMask |= 0x02;
+            return;
+        }
+        if (chunk == 2) {
+            if (len < 4) return;
+            s.valueBytes[3] = data[3];
+            s.receivedMask |= 0x04;
+            if (s.receivedMask == 0x07) {
+                float v = 0.0f;
+                memcpy(&v, s.valueBytes, sizeof(float));
+                _onLoggerRecord(s.sourceUid, s.channelId, s.recordType, s.flags, v);
+            }
+            s.active = false;
+            return;
+        }
+        return;
+    }
+
     // CHILD_EVENT (hub receives)
     if (canId >= WB_MSG_CHILD_EVENT_BASE &&
         canId < WB_MSG_CHILD_EVENT_BASE + 0x20 &&
@@ -444,9 +527,9 @@ void WearBlocksProtocol::handleMessage(uint32_t canId, const uint8_t* data, uint
         return;
     }
 
-    // SENSOR_DATA (hub receives)
+    // SENSOR_DATA (hub receives; logger modules may also passively sniff)
     if (canId >= WB_MSG_SENSOR_BASE && canId < WB_MSG_ACTUATOR_BASE
-        && _onSensorData && _isHub && len >= 2) {
+        && _onSensorData && len >= 2) {
         _onSensorData(canId, data[0], &data[2], len - 2);
         return;
     }
@@ -496,3 +579,5 @@ void WearBlocksProtocol::onChildEvent(WBChildEventCallback cb) { _onChildEvent =
 void WearBlocksProtocol::onTopic(WBTopicCallback cb) { _onTopic = cb; }
 void WearBlocksProtocol::onSysConfig(WBSysConfigCallback cb) { _onSysConfig = cb; }
 void WearBlocksProtocol::onSysConfigAck(WBSysConfigAckCallback cb) { _onSysConfigAck = cb; }
+void WearBlocksProtocol::onLoggerRecord(WBLoggerRecordCallback cb) { _onLoggerRecord = cb; }
+void WearBlocksProtocol::onSlotUidMap(WBSlotUidMapCallback cb) { _onSlotUidMap = cb; }

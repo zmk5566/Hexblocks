@@ -297,6 +297,8 @@ export class WbApp extends LitElement {
           active_link: msg.active_link ?? prev?.active_link ?? null,
           transport_mode: msg.transport_mode ?? prev?.transport_mode ?? null,
           topology_state: msg.topology_state ?? prev?.topology_state ?? null,
+          logger_status: prev?.logger_status,
+          logger_config: prev?.logger_config,
           active: true,
         };
         if (existing >= 0) {
@@ -422,6 +424,8 @@ export class WbApp extends LitElement {
             parent_uid: null,
             parent_is_hub: null,
             parent_face: 0,
+            logger_status: undefined,
+            logger_config: undefined,
           }];
         }
         const key = uid ?? msg.slot;
@@ -651,6 +655,45 @@ export class WbApp extends LitElement {
             updated[idx].parent_remote = true;
             updated[idx].parent_face = 0;
           }
+          this._modules = updated;
+        }
+        break;
+      }
+      case 'logger_status': {
+        const idx = uid
+          ? this._modules.findIndex(m => m.uid === uid)
+          : -1;
+        if (idx >= 0) {
+          const updated = [...this._modules];
+          updated[idx] = {
+            ...updated[idx],
+            logger_status: {
+              queue_depth: msg.queue_depth,
+              dropped_count: msg.dropped_count,
+              last_ack_ms: msg.last_ack_ms,
+              rssi: msg.rssi,
+              snr: msg.snr,
+              time_quality: msg.time_quality,
+              config_rev: msg.config_rev,
+            },
+          };
+          this._modules = updated;
+        }
+        break;
+      }
+      case 'logger_config': {
+        const idx = uid
+          ? this._modules.findIndex(m => m.uid === uid)
+          : -1;
+        if (idx >= 0) {
+          const updated = [...this._modules];
+          updated[idx] = {
+            ...updated[idx],
+            logger_config: {
+              config_rev: msg.config_rev,
+              subscriptions: msg.subscriptions || [],
+            },
+          };
           this._modules = updated;
         }
         break;

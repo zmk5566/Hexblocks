@@ -107,6 +107,22 @@ class WsClient {
     this.send({ action: 'wireless_config', target, uid: target, mode });
   }
 
+  // ── LoRa logger config ───────────────────────────────────────
+
+  loggerInfo() {
+    this.send({ action: 'logger_info' });
+  }
+
+  loggerConfig(target, subscriptions, configRev = Date.now()) {
+    this.send({
+      action: 'logger_config',
+      target,
+      uid: target,
+      config_rev: configRev >>> 0,
+      subscriptions: subscriptions || [],
+    });
+  }
+
   // ── OSC forwarding (Mode B) ───────────────────────────────────
   // Bridge keeps the source of truth at ~/.wearblocks/osc_targets.json.
   // Any mutation broadcasts an osc_state message; per-target stats are
@@ -175,6 +191,7 @@ class WsClient {
       this.queryTopo();
       this.queryEca();
       this.wirelessInfo();
+      this.loggerInfo();
     };
 
     this._ws.onclose = () => {

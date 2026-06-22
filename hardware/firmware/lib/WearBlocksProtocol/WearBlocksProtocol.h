@@ -17,6 +17,7 @@ enum WBMessageType : uint32_t {
     WB_MSG_TOPIC_DISABLE    = 0x081,
     WB_MSG_SYS_CONFIG       = 0x090,
     WB_MSG_SYS_CONFIG_ACK   = 0x091,
+    WB_MSG_LOG_RECORD       = 0x092,
     WB_MSG_GOODBYE          = 0x0F0,
     WB_MSG_SENSOR_BASE      = 0x100,  // 0x100-0x1FF per module
     WB_MSG_ACTUATOR_BASE    = 0x200,  // 0x200-0x2FF per module: EXECUTE
@@ -60,6 +61,10 @@ typedef void (*WBSysConfigCallback)(const uint8_t* payload, uint16_t payloadLen,
                                     uint8_t sessionId);
 typedef void (*WBSysConfigAckCallback)(uint8_t moduleSlot, uint8_t status,
                                        uint8_t sessionId);
+typedef void (*WBLoggerRecordCallback)(uint32_t sourceUid, uint8_t channelId,
+                                       uint8_t recordType, uint8_t flags,
+                                       float value);
+typedef void (*WBSlotUidMapCallback)(uint8_t slot, uint32_t uid);
 
 #define WB_DESC_SESSIONS 4  // concurrent reassembly sessions (LRU)
 #define WB_SYS_CONFIG_MAX_PAYLOAD 224
@@ -86,6 +91,9 @@ public:
     void sendAck(uint8_t moduleSlot, uint32_t uid, bool descriptorCached);
     bool sendSysConfig(uint8_t moduleSlot, const uint8_t* payload,
                        uint16_t payloadLen, uint8_t sessionId = 0);
+    bool sendLoggerRecord(uint8_t loggerSlot, uint32_t sourceUid,
+                          uint8_t channelId, uint8_t recordType,
+                          uint8_t flags, float value);
 
     // --- Topic control ---
     void sendTopicEnable(uint8_t moduleSlot, uint8_t channelId);
@@ -115,6 +123,8 @@ public:
     void onTopic(WBTopicCallback cb);
     void onSysConfig(WBSysConfigCallback cb);
     void onSysConfigAck(WBSysConfigAckCallback cb);
+    void onLoggerRecord(WBLoggerRecordCallback cb);
+    void onSlotUidMap(WBSlotUidMapCallback cb);
 
 private:
     void handleMessage(uint32_t canId, const uint8_t* data, uint8_t len);
@@ -145,6 +155,19 @@ private:
     };
     SysConfigSession _sysConfigSession;
 
+    struct LoggerRecordSession {
+        bool active;
+        uint8_t seq;
+        uint32_t sourceUid;
+        uint8_t channelId;
+        uint8_t recordType;
+        uint8_t flags;
+        uint8_t valueBytes[4];
+        uint8_t receivedMask;
+        uint32_t lastChunkMs;
+    };
+    LoggerRecordSession _loggerRecordSession;
+
     WearBlocksCAN* _can;
     bool _isHub;
     uint8_t _moduleSlot;
@@ -163,6 +186,8 @@ private:
     WBTopicCallback _onTopic;
     WBSysConfigCallback _onSysConfig;
     WBSysConfigAckCallback _onSysConfigAck;
+    WBLoggerRecordCallback _onLoggerRecord;
+    WBSlotUidMapCallback _onSlotUidMap;
 };
 
 #endif

@@ -51,12 +51,16 @@
  *   $A <uidHex> <cmd> <p...>  actuator EXECUTE
  *   $TE <uidHex> <ch>      topic enable;  $TD <uidHex> <ch> disable
  *   $TA <uidHex>           topic enable all
+ *   $L,INFO                emit LoRa logger status rows
+ *   $L,CONFIG <uidHex> <base64Profile>
+ *                           send logger topic allowlist over SYS_CONFIG
  */
 
 #include <WearBlocksCAN.h>
 #include <WearBlocksProtocol.h>
 #include <WearBlocksDescriptor.h>
 #include <WearBlocksECA.h>
+#include <WearBlocksLogger.h>
 #include <WearBlocksWireless.h>
 #include <Preferences.h>
 #include <mbedtls/base64.h>
@@ -372,6 +376,8 @@ static uint16_t g_wifiMsgId = 1;
 static uint32_t g_wifiLastSensorSeq[WB_MAX_MODULES][WB_CH_MAX] = {};
 static uint32_t g_wifiProvisionCrc[WB_MAX_MODULES] = {};
 static uint32_t g_wifiProvisionAtMs[WB_MAX_MODULES] = {};
+static uint32_t g_loggerConfigRev[WB_MAX_MODULES] = {};
+static uint8_t  g_loggerProvisionSession[WB_MAX_MODULES] = {};
 static const uint32_t WB_CAN_LINK_STALE_MS = 3000;
 
 // ── uid → hex helper ──────────────────────────────────────────
@@ -457,6 +463,21 @@ static void emitModuleHello(Print& p, const RegisteredModule* m) {
 
 static bool moduleHasWifiEndpoint(const RegisteredModule* m) {
     return m && m->wifiIp != 0 && m->wifiPort != 0;
+}
+
+static bool moduleIsLogger(const RegisteredModule* m) {
+    if (!m || !m->hasDescriptor) return false;
+    if (strcmp(m->descriptor.moduleId, "loralogv1") == 0) return true;
+    if (strcmp(m->descriptor.category, "wireless_uplink") == 0) return true;
+    for (uint8_t i = 0; i < m->descriptor.numCapabilities; i++) {
+        const WBCapability& cap = m->descriptor.capabilities[i];
+        if (strcmp(cap.type, "logger") == 0 ||
+            strcmp(cap.modality, "batch_log") == 0 ||
+            strcmp(cap.modality, "lora_uplink") == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static bool isTransportModeText(const char* mode) {
@@ -592,11 +613,26 @@ static bool provisionWirelessForSlot(uint8_t slot, bool force = false) {
     return ok;
 }
 
+static bool forwardLoggerRecord(uint32_t sourceUid, uint8_t channelId,
+                                uint8_t recordType, uint8_t flags,
+                                float value);
+void broadcastSlotUidMap();
+void emitLoggerInfo();
+
 void onSysConfigAck(uint8_t moduleSlot, uint8_t status, uint8_t sessionId) {
     const RegisteredModule* m = registry.getModule(moduleSlot);
-    Serial.printf("[WIFI] provision ack slot=%u uid=%s status=%u session=%u\n",
-                  (unsigned)moduleSlot, m ? uidHex(m->uid) : "????????",
-                  (unsigned)status, (unsigned)sessionId);
+    bool loggerAck = moduleSlot < WB_MAX_MODULES &&
+                     g_loggerProvisionSession[moduleSlot] == sessionId;
+    if (loggerAck) {
+        Serial.printf("[LORA-LOG] config ack slot=%u uid=%s status=%u session=%u rev=%lu\n",
+                      (unsigned)moduleSlot, m ? uidHex(m->uid) : "????????",
+                      (unsigned)status, (unsigned)sessionId,
+                      (unsigned long)g_loggerConfigRev[moduleSlot]);
+    } else {
+        Serial.printf("[WIFI] provision ack slot=%u uid=%s status=%u session=%u\n",
+                      (unsigned)moduleSlot, m ? uidHex(m->uid) : "????????",
+                      (unsigned)status, (unsigned)sessionId);
+    }
 }
 
 // ── PendingAttach ops ─────────────────────────────────────────
@@ -891,6 +927,7 @@ void onModuleHello(const HelloMessage& msg) {
             emitModuleHello(out, m);
             emitModuleIdentity(out, m);
         }
+        if (moduleIsLogger(registry.getModule(slot))) emitLoggerInfo();
         return;
     }
 
@@ -1039,6 +1076,8 @@ void onModuleDescriptor(uint8_t sourceSlot, const WearBlocksDescriptor& desc) {
     // descriptor refresh; the cached-skip reattach path emits this from
     // onModuleHello() instead. No-op when no program is loaded.
     eca.autoEnableTopicsForUid(m->uid);
+    forwardLoggerRecord(m->uid, 0, WB_LOGGER_RECORD_TOPOLOGY_EVENT, 1, 1.0f);
+    if (moduleIsLogger(m)) emitLoggerInfo();
 }
 
 void onSensorData(uint32_t canId, uint8_t channelId,
@@ -1243,11 +1282,144 @@ void emitEcaSnapshot() {
     out.println("$Q,DONE");
 }
 
+void broadcastSlotUidMap() {
+    for (uint8_t s = 1; s < WB_MAX_MODULES; s++) {
+        const RegisteredModule* m = registry.getModule(s);
+        if (!m || m->state == MODULE_DETACHED || m->uid == 0) continue;
+        protocol.sendAck(s, m->uid, m->hasDescriptor);
+        delay(1);
+    }
+}
+
+void emitLoggerInfo() {
+    bool hasLogger = false;
+    for (uint8_t s = 1; s < WB_MAX_MODULES; s++) {
+        const RegisteredModule* m = registry.getModule(s);
+        if (moduleIsLogger(m) && m->state != MODULE_DETACHED) {
+            hasLogger = true;
+            break;
+        }
+    }
+    if (hasLogger) broadcastSlotUidMap();
+
+    for (uint8_t s = 1; s < WB_MAX_MODULES; s++) {
+        const RegisteredModule* m = registry.getModule(s);
+        if (!moduleIsLogger(m) || m->state == MODULE_DETACHED) continue;
+        out.printf("$L,%s,%u,%lu,%lu,%d,%d,%u,%lu\n",
+                   uidHex(m->uid),
+                   0,
+                   0UL,
+                   0UL,
+                   0,
+                   0,
+                   (unsigned)WB_LOGGER_TIME_HUB_SYNC,
+                   (unsigned long)g_loggerConfigRev[s]);
+    }
+}
+
+static bool provisionLoggerForSlot(uint8_t slot, const uint8_t* profileBytes,
+                                   uint16_t profileLen, uint32_t configRev) {
+    if (slot == 0 || slot >= WB_MAX_MODULES || !profileBytes || profileLen == 0) {
+        return false;
+    }
+    uint8_t sessionId = (uint8_t)((configRev ^ millis()) & 0xFF);
+    if (sessionId == 0) sessionId = 1;
+    bool ok = protocol.sendSysConfig(slot, profileBytes, profileLen, sessionId);
+    if (ok) {
+        g_loggerConfigRev[slot] = configRev;
+        g_loggerProvisionSession[slot] = sessionId;
+    }
+    return ok;
+}
+
+static bool forwardLoggerRecord(uint32_t sourceUid, uint8_t channelId,
+                                uint8_t recordType, uint8_t flags,
+                                float value) {
+    bool sent = false;
+    for (uint8_t s = 1; s < WB_MAX_MODULES; s++) {
+        const RegisteredModule* logger = registry.getModule(s);
+        if (!moduleIsLogger(logger) || logger->state != MODULE_REGISTERED) continue;
+        sent = protocol.sendLoggerRecord(s, sourceUid, channelId, recordType,
+                                         flags, value) || sent;
+    }
+    return sent;
+}
+
 bool handleEcaCommand(const char* cmd, size_t len);
 static bool dispatchActuatorForLink(uint8_t slot, uint32_t uid, uint8_t cmd,
                                     const uint8_t* params, uint8_t paramLen);
 static bool dispatchTopicForLink(uint8_t slot, uint32_t uid, uint8_t channelId,
                                  bool enable);
+bool handleLoggerHostCommand(const char* cmd);
+
+bool handleLoggerHostCommand(const char* cmd) {
+    if (strcmp(cmd, "$L,INFO") == 0) {
+        emitLoggerInfo();
+        return true;
+    }
+
+    if (strncmp(cmd, "$L,CONFIG", 9) == 0) {
+        const char* p = cmd + 9;
+        while (*p == ' ' || *p == ',') p++;
+        char target[16] = {0};
+        uint8_t ti = 0;
+        while (*p && *p != ' ' && ti < sizeof(target) - 1) target[ti++] = *p++;
+        while (*p == ' ') p++;
+        if (!target[0] || !*p) {
+            out.println("$ERR L CONFIG expects uid base64_profile");
+            return true;
+        }
+
+        uint32_t uid;
+        if (!parseUidHex(target, uid)) {
+            out.println("$ERR L CONFIG bad_uid");
+            return true;
+        }
+        uint8_t slot = registry.findByUid(uid);
+        if (slot == 0xFF) {
+            out.println("$ERR L CONFIG unknown_uid");
+            return true;
+        }
+        const RegisteredModule* m = registry.getModule(slot);
+        if (!moduleIsLogger(m)) {
+            out.println("$ERR L CONFIG target_not_logger");
+            return true;
+        }
+
+        size_t b64Len = strlen(p);
+        while (b64Len > 0 && (p[b64Len - 1] == ' ' || p[b64Len - 1] == '\t')) {
+            b64Len--;
+        }
+        unsigned char decoded[WB_LOGGER_PROFILE_MAX_ENCODED];
+        size_t decodedLen = 0;
+        int ret = mbedtls_base64_decode(decoded, sizeof(decoded), &decodedLen,
+                                        (const unsigned char*)p, b64Len);
+        if (ret != 0 || decodedLen == 0 || decodedLen > WB_LOGGER_PROFILE_MAX_ENCODED) {
+            out.printf("$ERR L CONFIG b64_decode ret=%d\n", ret);
+            return true;
+        }
+
+        WBLoggerProfile parsed;
+        if (!wbLoggerProfileDecode(decoded, (uint16_t)decodedLen, parsed)) {
+            out.println("$ERR L CONFIG bad_profile");
+            return true;
+        }
+
+        bool ok = provisionLoggerForSlot(slot, decoded, (uint16_t)decodedLen,
+                                         parsed.configRev);
+        if (!ok) {
+            out.println("$ERR L CONFIG send_failed");
+            return true;
+        }
+        out.printf("$OK L CONFIG %s rev=%lu subs=%u\n",
+                   uidHex(uid), (unsigned long)parsed.configRev,
+                   (unsigned)parsed.count);
+        emitLoggerInfo();
+        return true;
+    }
+
+    return false;
+}
 
 bool handleWirelessHostCommand(const char* cmd) {
     if (strcmp(cmd, "$W,INFO") == 0) {
@@ -1321,6 +1493,7 @@ void handleSerialCommand(const char* cmd) {
     if (strcmp(cmd, "$Q,STATUS") == 0) { emitStatusSnapshot(); return; }
     if (strcmp(cmd, "$Q,TOPO")   == 0) { emitTopology();       return; }
     if (strcmp(cmd, "$Q,ECA")    == 0) { emitEcaSnapshot();    return; }
+    if (handleLoggerHostCommand(cmd)) return;
     if (handleWirelessHostCommand(cmd)) return;
 
     // $Q,FORGET ALL          — wipe entire topology memory + NVS blob
@@ -1495,6 +1668,7 @@ void onSlotDetached(uint32_t uid) {
 }
 void onSlotRemoved(uint32_t uid) {
     out.printf("$U,%s\n", uidHex(uid));
+    forwardLoggerRecord(uid, 0, WB_LOGGER_RECORD_TOPOLOGY_EVENT, 2, 0.0f);
     // A remove is the only signal that this UID is "gone for good"
     // (TTL reap, evict, ensureFaceFree's stale-DETACHED cleanup all
     // funnel through here). Drop its memory entry so it doesn't override
@@ -1816,6 +1990,9 @@ static bool dispatchActuatorForLink(uint8_t slot, uint32_t uid, uint8_t cmd,
     if (shouldRouteActionWifi(m)) {
         sent = wifiSendActuator(slot, uid, cmd, params, paramLen) || sent;
     }
+    if (sent) {
+        forwardLoggerRecord(uid, cmd, WB_LOGGER_RECORD_ECA_EVENT, 0, 1.0f);
+    }
     return sent;
 }
 
@@ -1934,6 +2111,11 @@ static void handleWirelessSensor(const WBOscMessage& msg, IPAddress ip, uint16_t
     memcpy(payload, &value, 4);
     eca.updateSensor(slot, ch, payload, sizeof(payload));
     out.printf("$S,%s,%d,%.4f\n", uidHex(uid), ch, value);
+    if (m->topologyState != WB_TOPO_PHYSICAL ||
+        m->activeLink == WB_LINK_WIFI ||
+        !shouldAcceptCanSensor(m)) {
+        forwardLoggerRecord(uid, ch, WB_LOGGER_RECORD_SENSOR, 0, value);
+    }
     sampleCount++;
 }
 
@@ -1972,6 +2154,8 @@ static void handleWirelessDescriptorBlob(const WBOscMessage& msg,
     emitModuleIdentity(out, m);
     emitWirelessState(out, m);
     eca.autoEnableTopicsForUid(m->uid);
+    forwardLoggerRecord(m->uid, 0, WB_LOGGER_RECORD_TOPOLOGY_EVENT, 1, 1.0f);
+    if (moduleIsLogger(m)) emitLoggerInfo();
     wifiSendAck(ip, port, uidText, seq, "descriptor");
 }
 
