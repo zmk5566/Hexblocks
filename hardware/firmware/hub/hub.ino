@@ -1860,7 +1860,7 @@ static bool oscTokenOk(const WBOscMessage& msg, uint8_t idx) {
 }
 
 static void wifiRandomHex(char* out, size_t outLen, uint8_t chars) {
-    static const char HEX[] = "0123456789ABCDEF";
+    static const char kHexDigits[] = "0123456789ABCDEF";
     if (!out || outLen == 0) return;
     uint8_t n = min((uint8_t)(outLen - 1), chars);
     uint32_t r = 0;
@@ -1868,7 +1868,7 @@ static void wifiRandomHex(char* out, size_t outLen, uint8_t chars) {
         if ((i % 8) == 0) {
             r = esp_random();
         }
-        out[i] = HEX[(r >> ((i % 8) * 4)) & 0x0F];
+        out[i] = kHexDigits[(r >> ((i % 8) * 4)) & 0x0F];
     }
     out[n] = '\0';
 }
