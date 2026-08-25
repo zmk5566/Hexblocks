@@ -37,6 +37,32 @@ and starts the WebSocket bridge on `:8765` plus HTTP on `:3000`.
 
 Open `http://localhost:3000` in the browser.
 
+## Three.js spatial twin
+
+The companion UI includes a full-screen **⬡ 3D Twin** view in the bottom
+status bar. It renders the bridge's existing state; it does not run a second
+simulation engine.
+
+- `hello` and `descriptor` create labeled module bodies.
+- `topology` and child stack events place modules on their hub or parent face.
+- `sensor` values drive live inspection and the restrained IMU tilt cue.
+- `actuator_state` drives LED emissive color and vibration animation.
+- Modules missing an authoritative attachment remain visible on the dashed
+  unresolved-topology rail.
+
+Run `--sim-demo`, open the 3D Twin, then use the existing debug console to
+send an actuator command. For example, UID `FACE0005`, command `1`, params
+`255 40 5 100` lights the simulated RGB module and updates the inspector.
+The same view also works with physical hardware because it consumes the same
+bridge messages and never writes its own module state.
+
+The spatial projection is implemented in `frontend/js/sim-scene-model.js`.
+Its topology tests run without WebGL:
+
+```bash
+node --test frontend/test/sim-scene-model.test.mjs
+```
+
 ## Unit tests
 
 ```bash
@@ -235,3 +261,23 @@ oscdump should start printing one line per IMU sample.
 
 Limitations (v1): UDP only; per-channel messages only (no bundling);
 actuator messages emit the `cmd` code as their scalar arg.
+
+### OSC actuator ingress
+
+The bridge also listens on `udp://127.0.0.1:7001` for the return direction:
+
+```text
+/hex/control/<8-hex-uid>/actuator <cmd> <integer parameters...>
+```
+
+Accepted messages are converted to `$A <uid> <cmd> <params...>` and placed on
+the existing `serial_write_queue`. In `--sim` modes the normal simulator queue
+consumer applies them; with USB or BLE the normal transport writer sends the
+same line to the Hub. OSC never writes directly to a transport.
+
+Initial commands are LED off/solid (`0`, `1`), vibration tap/pulse/stop
+(`16`, `17`, `19`), and audio tone/stop (`48`, `49`). The listener rejects
+unknown UIDs, unsupported commands, incorrect arity, non-integer or out-of-byte
+range parameters, malformed OSC, and non-loopback senders. Override the bind
+address or port with `--osc-input-host` and `--osc-input-port`. Remote ingress
+requires the explicit `--osc-allow-remote` flag.

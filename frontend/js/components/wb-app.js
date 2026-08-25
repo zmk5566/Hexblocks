@@ -17,6 +17,7 @@ import './wb-llm-panel.js';
 import './wb-devices-panel.js';
 import './wb-eca-inspector.js';
 import './wb-osc-panel.js';
+import './wb-sim-stage.js';
 import { decodeBytecode } from '../eca-decoder.js';
 
 const DEFAULT_MODULE_COLOR = '#888888';
@@ -58,6 +59,7 @@ export class WbApp extends LitElement {
     _ecaRules:       { type: Object,  state: true },  // decoded JSON, null if no program
     _oscOpen:        { type: Boolean, state: true },
     _oscActiveCount: { type: Number,  state: true },
+    _simStageOpen:   { type: Boolean, state: true },
   };
 
   static styles = css`
@@ -189,6 +191,7 @@ export class WbApp extends LitElement {
     this._workspaceRulesAutoDefault = false;
     this._oscOpen = false;
     this._oscActiveCount = 0;
+    this._simStageOpen = false;
     // Slot → uid lookup built up as we see hellos; lets us resolve
     // legacy slot-only messages from older bridges / sim paths.
     this._slotToUid = new Map();
@@ -992,8 +995,21 @@ export class WbApp extends LitElement {
         .oscActive=${this._oscActiveCount}
         @open-devices-panel=${() => this._devicesOpen = true}
         @open-eca-inspector=${() => this._ecaInspectorOpen = true}
-        @open-osc-panel=${() => this._oscOpen = true}>
+        @open-osc-panel=${() => this._oscOpen = true}
+        @open-sim-stage=${() => this._simStageOpen = true}>
       </wb-status-bar>
+
+      <wb-sim-stage
+        ?open=${this._simStageOpen}
+        .modules=${visibleModules}
+        .children=${visibleChildren}
+        .sensorByUid=${this._sensorByUid}
+        .actuatorByUid=${this._actuatorByUid}
+        .highlightedUid=${this._highlightedUid || ''}
+        @close=${() => this._simStageOpen = false}
+        @open-panel=${this._onOpenPanel}
+        @highlight-module=${this._onHighlightModule}>
+      </wb-sim-stage>
 
       <wb-devices-panel
         ?open=${this._devicesOpen}

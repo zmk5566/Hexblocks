@@ -156,6 +156,24 @@ export class WbStatusBar extends LitElement {
     .transport-btn:hover { color: var(--wb-text); border-color: var(--wb-text-dim); }
     .transport-btn.active { color: var(--wb-text); border-color: var(--wb-text); }
 
+    .twin-btn, .osc-btn {
+      background: transparent;
+      border: 1px solid var(--wb-border);
+      color: var(--wb-text-dim);
+      font-family: var(--wb-mono);
+      font-size: 0.65rem;
+      padding: 2px 8px;
+      cursor: pointer;
+    }
+    .twin-btn:hover, .osc-btn:hover {
+      color: var(--wb-text);
+      border-color: var(--wb-text-dim);
+    }
+    .twin-btn {
+      color: #75a94e;
+      border-color: rgba(117, 169, 78, .55);
+    }
+
     .eca-chip {
       margin-left: auto;
       background: transparent;
@@ -318,6 +336,13 @@ export class WbStatusBar extends LitElement {
         >
           ${this._transportIcon()} ${this._transportLabel()}
         </button>
+
+        <button
+          class="twin-btn"
+          title="Open the live Three.js module topology and actuator view"
+          @click=${() => this.dispatchEvent(new CustomEvent('open-sim-stage',
+              { bubbles: true, composed: true }))}
+        >⬡ 3D Twin</button>
 
         <button
           class="osc-btn ${this.oscActive > 0 ? 'active' : ''}"

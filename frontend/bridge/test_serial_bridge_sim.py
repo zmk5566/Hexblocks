@@ -4,6 +4,8 @@ from __future__ import annotations
 import pathlib
 import sys
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 import serial_bridge
@@ -30,3 +32,19 @@ def test_non_imu_sim_payloads_use_catalog_labels(monkeypatch):
         "celsius": CH.CELSIUS,
         "humidity": CH.HUMIDITY,
     }
+
+
+@pytest.mark.asyncio
+async def test_broadcast_survives_client_removal_during_send(monkeypatch):
+    class ClosingClient:
+        async def send(self, _payload):
+            serial_bridge.clients.discard(self)
+
+    closing = ClosingClient()
+    serial_bridge.clients.clear()
+    serial_bridge.clients.add(closing)
+    monkeypatch.setattr(serial_bridge.osc_forwarder, "forward", lambda _msg: None)
+
+    await serial_bridge.broadcast({"type": "command_ack", "status": "ok"})
+
+    assert closing not in serial_bridge.clients

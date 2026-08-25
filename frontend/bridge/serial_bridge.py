@@ -28,6 +28,7 @@ from transport import (
 from osc_forwarder import (
     OscForwarder, schema_to_default_mappings, load_channel_catalog,
 )
+from osc_ingress import OscIngress
 
 WS_PORT, HTTP_PORT, BAUD = 8765, 3000, 115200
 
@@ -243,6 +244,23 @@ stack_cache: dict = {}
 actuator_cache: dict = {}
 
 serial_write_queue: asyncio.Queue = asyncio.Queue()
+
+
+def create_osc_ingress(
+    host: str = "127.0.0.1",
+    port: int = 7001,
+    *,
+    allow_remote: bool = False,
+) -> OscIngress:
+    """Create the OSC actuator listener on the existing serial queue seam."""
+    return OscIngress(
+        host=host,
+        port=port,
+        allow_remote=allow_remote,
+        known_uids=lambda: modules_by_uid.keys(),
+        enqueue=serial_write_queue.put,
+        on_error=lambda message: print(f"[osc-in] rejected: {message}"),
+    )
 
 # ── Active transport (USB or BLE — mutually exclusive) ─────────
 # Set by serial_loop / ble_loop. The transport_supervisor coroutine
@@ -633,7 +651,11 @@ async def broadcast(msg: dict):
     recorder.event(msg)
     payload = json.dumps(msg)
     dead = set()
-    for ws in clients:
+    # A client can close while an awaited send is in progress. websocket_handler
+    # then removes it from the shared set; iterating the live set would raise
+    # `RuntimeError: Set changed size during iteration` and stop the simulator.
+    # Broadcast over a snapshot and reconcile dead connections afterwards.
+    for ws in tuple(clients):
         try:
             await ws.send(payload)
         except websockets.exceptions.ConnectionClosed:
@@ -2402,10 +2424,13 @@ async def main():
                          "post-mortem debugging (timestamped, line-flushed).")
     ap.add_argument("--osc-allow-remote", dest="osc_allow_remote",
                     action="store_true",
-                    help="Allow OSC forwarding to non-loopback hosts. "
-                         "Default policy is loopback-only because the bridge "
-                         "WS listens on 0.0.0.0; without this flag the "
-                         "forwarder cannot be turned into a UDP reflector.")
+                    help="Allow OSC forwarding targets and ingress senders "
+                         "outside loopback. The default keeps both OSC "
+                         "directions local to this machine.")
+    ap.add_argument("--osc-input-host", default="127.0.0.1",
+                    help="OSC actuator ingress bind host (default: 127.0.0.1).")
+    ap.add_argument("--osc-input-port", type=int, default=7001,
+                    help="OSC actuator ingress UDP port (default: 7001).")
     args = ap.parse_args()
     if args.selftest:
         _parse_line_selftest()
@@ -2432,19 +2457,31 @@ async def main():
         if osc_forwarder.allow_remote:
             print("[bridge] OSC: --osc-allow-remote set; non-loopback targets allowed")
         await osc_forwarder.start()
-        asyncio.create_task(_osc_stats_loop())
-        if args.sim or args.sim_demo:
-            await sim_loop(auto_demo=args.sim_demo)
-        elif args.mock:
-            await mock_loop()
-        elif args.ble:
-            # Seed the request queue so the supervisor connects immediately.
-            await transport_request.put(("ble", args.ble, args.ble))
-            await transport_supervisor(initial_port=None)
-        elif args.idle:
-            await transport_supervisor(initial_port=None)
-        else:
-            await serial_loop(args.port)
+        osc_ingress = create_osc_ingress(
+            args.osc_input_host,
+            args.osc_input_port,
+            allow_remote=bool(args.osc_allow_remote),
+        )
+        try:
+            await osc_ingress.start()
+            print(f"[bridge] OSC actuator ingress on "
+                  f"udp://{args.osc_input_host}:{osc_ingress.port}")
+            asyncio.create_task(_osc_stats_loop())
+            if args.sim or args.sim_demo:
+                await sim_loop(auto_demo=args.sim_demo)
+            elif args.mock:
+                await mock_loop()
+            elif args.ble:
+                # Seed the request queue so the supervisor connects immediately.
+                await transport_request.put(("ble", args.ble, args.ble))
+                await transport_supervisor(initial_port=None)
+            elif args.idle:
+                await transport_supervisor(initial_port=None)
+            else:
+                await serial_loop(args.port)
+        finally:
+            await osc_ingress.stop()
+            await osc_forwarder.stop()
 
 if __name__ == "__main__":
     asyncio.run(main())
