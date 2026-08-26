@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hex Motor Car BLE Test</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f7f4;
+      --panel: #ffffff;
+      --ink: #202124;
+      --muted: #626a70;
+      --line: #d8ddd8;
+      --accent: #147d64;
+      --accent-strong: #0d5d4a;
+      --danger: #b43b3b;
+      --shadow: 0 12px 32px rgba(22, 35, 31, 0.12);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+
+    main {
+      width: min(760px, calc(100vw - 28px));
+      margin: 0 auto;
+      padding: 24px 0 32px;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.15;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .status {
+      min-width: 112px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--muted);
+      text-align: center;
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    .status.connected {
+      color: var(--accent-strong);
+      border-color: rgba(20, 125, 100, 0.35);
+      background: #ecf7f2;
+    }
+
+    .surface {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 18px;
+    }
+
+    .topbar {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 18px;
+    }
+
+    button {
+      appearance: none;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      min-height: 44px;
+      transition: transform 120ms ease, background 120ms ease, border-color 120ms ease;
+      touch-action: manipulation;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
+    }
+
+    button:not(:disabled):active { transform: translateY(1px); }
+
+    .connect {
+      padding: 0 18px;
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+
+    .connect:not(:disabled):hover { background: var(--accent-strong); }
+
+    .stop {
+      background: var(--danger);
+      border-color: var(--danger);
+      color: #fff;
+    }
+
+    .control-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(78px, 1fr));
+      grid-template-rows: repeat(3, 72px);
+      gap: 10px;
+      margin: 16px 0 20px;
+    }
+
+    .drive {
+      font-size: 26px;
+      background: #f9faf8;
+    }
+
+    .drive:not(:disabled):hover {
+      border-color: rgba(20, 125, 100, 0.55);
+      background: #eef8f3;
+    }
+
+    .forward { grid-column: 2; grid-row: 1; }
+    .left { grid-column: 1; grid-row: 2; }
+    .brake { grid-column: 2; grid-row: 2; }
+    .right { grid-column: 3; grid-row: 2; }
+    .back { grid-column: 2; grid-row: 3; }
+
+    .speed-row {
+      display: grid;
+      grid-template-columns: 72px 1fr 44px;
+      gap: 12px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 650;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+    }
+
+    .telemetry {
+      margin-top: 16px;
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+    }
+
+    .readout {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      min-height: 64px;
+      background: #fbfcfa;
+    }
+
+    .label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 6px;
+    }
+
+    .value {
+      font: 700 20px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      letter-spacing: 0;
+    }
+
+    .log {
+      margin-top: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #111815;
+      color: #d7f7e8;
+      min-height: 96px;
+      max-height: 170px;
+      overflow: auto;
+      padding: 10px;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+    }
+
+    @media (max-width: 560px) {
+      main { width: min(100vw - 18px, 760px); padding-top: 14px; }
+      header { align-items: flex-start; }
+      h1 { font-size: 20px; }
+      .surface { padding: 14px; }
+      .topbar { grid-template-columns: 1fr; }
+      .connect { width: 100%; }
+      .control-grid { grid-template-rows: repeat(3, 64px); }
+      .telemetry { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Hex Motor Car BLE Test</h1>
+      <div id="status" class="status">Disconnected</div>
+    </header>
+
+    <section class="surface">
+      <div class="topbar">
+        <div class="speed-row">
+          <span>Speed</span>
+          <input id="speed" type="range" min="40" max="255" step="5" value="150">
+          <span id="speedValue">150</span>
+        </div>
+        <button id="connect" class="connect">Connect</button>
+      </div>
+
+      <div class="control-grid" aria-label="Drive controls">
+        <button class="drive forward" data-drive="forward" disabled>▲</button>
+        <button class="drive left" data-drive="left" disabled>◀</button>
+        <button class="drive stop brake" data-drive="stop" disabled>■</button>
+        <button class="drive right" data-drive="right" disabled>▶</button>
+        <button class="drive back" data-drive="back" disabled>▼</button>
+      </div>
+
+      <div class="telemetry">
+        <div class="readout">
+          <div class="label">Left</div>
+          <div id="leftValue" class="value">0</div>
+        </div>
+        <div class="readout">
+          <div class="label">Right</div>
+          <div id="rightValue" class="value">0</div>
+        </div>
+      </div>
+
+      <div id="log" class="log"></div>
+    </section>
+  </main>
+
+  <script>
+    const SERVICE_UUID = '6f8f0001-b5a3-f393-e0a9-e50e24dcca9e';
+    const RX_UUID = '6f8f0002-b5a3-f393-e0a9-e50e24dcca9e';
+    const TX_UUID = '6f8f0003-b5a3-f393-e0a9-e50e24dcca9e';
+
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+
+    const statusEl = document.querySelector('#status');
+    const connectBtn = document.querySelector('#connect');
+    const speedEl = document.querySelector('#speed');
+    const speedValueEl = document.querySelector('#speedValue');
+    const leftValueEl = document.querySelector('#leftValue');
+    const rightValueEl = document.querySelector('#rightValue');
+    const logEl = document.querySelector('#log');
+    const driveButtons = [...document.querySelectorAll('[data-drive]')];
+
+    let device = null;
+    let rxChar = null;
+    let txChar = null;
+    let connected = false;
+    let activeCommand = null;
+
+    function log(line) {
+      const stamp = new Date().toLocaleTimeString();
+      logEl.textContent = `[${stamp}] ${line}\n` + logEl.textContent;
+    }
+
+    function setConnected(next) {
+      connected = next;
+      statusEl.textContent = next ? 'Connected' : 'Disconnected';
+      statusEl.classList.toggle('connected', next);
+      connectBtn.textContent = next ? 'Disconnect' : 'Connect';
+      driveButtons.forEach((btn) => { btn.disabled = !next; });
+      if (!next) {
+        rxChar = null;
+        txChar = null;
+        activeCommand = null;
+        updateReadout(0, 0);
+      }
+    }
+
+    function speed() {
+      return Number(speedEl.value);
+    }
+
+    function updateReadout(left, right) {
+      leftValueEl.textContent = String(left);
+      rightValueEl.textContent = String(right);
+    }
+
+    async function send(line) {
+      if (!connected || !rxChar) return;
+      const payload = enc.encode(`${line}\n`);
+      if (rxChar.writeValueWithoutResponse) {
+        await rxChar.writeValueWithoutResponse(payload);
+      } else {
+        await rxChar.writeValue(payload);
+      }
+      log(`> ${line}`);
+    }
+
+    function speedsFor(command) {
+      const v = speed();
+      const turn = Math.max(45, Math.round(v * 0.72));
+      if (command === 'forward') return [v, v];
+      if (command === 'back') return [-v, -v];
+      if (command === 'left') return [-turn, turn];
+      if (command === 'right') return [turn, -turn];
+      return [0, 0];
+    }
+
+    async function drive(command) {
+      activeCommand = command === 'stop' ? null : command;
+      if (command === 'stop') {
+        updateReadout(0, 0);
+        await send('S');
+        return;
+      }
+      const [left, right] = speedsFor(command);
+      updateReadout(left, right);
+      await send(`D,${left},${right}`);
+    }
+
+    async function connect() {
+      if (!navigator.bluetooth) {
+        log('Web Bluetooth is unavailable in this browser.');
+        return;
+      }
+
+      device = await navigator.bluetooth.requestDevice({
+        filters: [{ namePrefix: 'HexMotorCar' }],
+        optionalServices: [SERVICE_UUID]
+      });
+      device.addEventListener('gattserverdisconnected', () => {
+        log('Disconnected');
+        setConnected(false);
+      });
+
+      const server = await device.gatt.connect();
+      const service = await server.getPrimaryService(SERVICE_UUID);
+      rxChar = await service.getCharacteristic(RX_UUID);
+      txChar = await service.getCharacteristic(TX_UUID);
+      await txChar.startNotifications();
+      txChar.addEventListener('characteristicvaluechanged', (event) => {
+        log(`< ${dec.decode(event.target.value).trim()}`);
+      });
+
+      setConnected(true);
+      await send('P');
+    }
+
+    async function disconnect() {
+      try { await send('S'); } catch (_) {}
+      if (device?.gatt?.connected) device.gatt.disconnect();
+      setConnected(false);
+    }
+
+    connectBtn.addEventListener('click', async () => {
+      try {
+        if (connected) await disconnect();
+        else await connect();
+      } catch (err) {
+        log(err?.message || String(err));
+        setConnected(false);
+      }
+    });
+
+    speedEl.addEventListener('input', async () => {
+      speedValueEl.textContent = speedEl.value;
+      if (activeCommand) await drive(activeCommand);
+    });
+
+    for (const btn of driveButtons) {
+      btn.addEventListener('click', async () => {
+        try {
+          await drive(btn.dataset.drive);
+        } catch (err) {
+          log(err?.message || String(err));
+        }
+      });
+    }
+
+    window.addEventListener('beforeunload', () => {
+      if (connected && rxChar) {
+        const payload = enc.encode('S\n');
+        const write = rxChar.writeValueWithoutResponse || rxChar.writeValue;
+        write.call(rxChar, payload).catch(() => {});
+      }
+    });
+
+    setConnected(false);
+    speedValueEl.textContent = speedEl.value;
+  </script>
+</body>
+</html>

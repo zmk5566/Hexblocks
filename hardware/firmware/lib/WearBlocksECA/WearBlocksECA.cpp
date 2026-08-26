@@ -26,7 +26,7 @@ static bool wbEcaIsTransientChannel(uint8_t channelId) {
 // ─────────────────────────────────────────────────────
 
 WearBlocksECA::WearBlocksECA()
-    : _uidToSlot(nullptr),
+    : _uidToSlot(nullptr), _localActuator(nullptr),
       _numVCs(0), _numRules(0), _running(false), _hasProgram(false),
       _rawLen(0), _proto(nullptr) {
     memset(_cache, 0, sizeof(_cache));
@@ -494,27 +494,21 @@ void WearBlocksECA::executeAction(const WBAction& act) {
         return;
     }
 
-    // Actuator commands: target is a module UID. Resolve to slot before
-    // emitting the CAN frame. If the UID isn't registered, skip silently.
-    uint8_t targetSlot = _uidToSlot ? _uidToSlot(act.target) : 0;
-    if (targetSlot == 0) {
-        Serial.printf("[ECA] ACT skip: uid=%08lX not registered\n",
-                      (unsigned long)act.target);
-        return;
-    }
-
-    uint8_t buf[8];
+    // Build the actuator payload once. A motor-hub may consume it locally;
+    // otherwise the exact same bytes are sent to the target module over CAN.
+    uint8_t buf[8] = {};
+    uint8_t payloadLen = 0;
     switch ((WBActCmd)act.cmd) {
         case ACT_LED_SOLID: {
             buf[0] = clampByte(vals[0]);  // R
             buf[1] = clampByte(vals[1]);  // G
             buf[2] = clampByte(vals[2]);  // B
-            _proto->sendActuatorCommand(targetSlot, act.cmd, buf, 3);
+            payloadLen = 3;
             break;
         }
         case ACT_LED_OFF:
         case ACT_LED_STOP:
-            _proto->sendActuatorCommand(targetSlot, act.cmd, nullptr, 0);
+            payloadLen = 0;
             break;
 
         case ACT_VIBRATE: {
@@ -522,7 +516,7 @@ void WearBlocksECA::executeAction(const WBAction& act) {
             buf[0] = clampByte(vals[0]);          // intensity
             buf[1] = (dur >> 8) & 0xFF;
             buf[2] = dur & 0xFF;
-            _proto->sendActuatorCommand(targetSlot, act.cmd, buf, 3);
+            payloadLen = 3;
             break;
         }
         case ACT_VIBRATE_PULSE: {
@@ -530,7 +524,7 @@ void WearBlocksECA::executeAction(const WBAction& act) {
             buf[1] = clampByte(vals[1]);  // on_10ms
             buf[2] = clampByte(vals[2]);  // off_10ms
             buf[3] = clampByte(vals[3]);  // count
-            _proto->sendActuatorCommand(targetSlot, act.cmd, buf, 4);
+            payloadLen = 4;
             break;
         }
         case ACT_VIBRATE_RAMP: {
@@ -539,11 +533,11 @@ void WearBlocksECA::executeAction(const WBAction& act) {
             buf[1] = clampByte(vals[1]);  // to_pct
             buf[2] = (dur >> 8) & 0xFF;
             buf[3] = dur & 0xFF;
-            _proto->sendActuatorCommand(targetSlot, act.cmd, buf, 4);
+            payloadLen = 4;
             break;
         }
         case ACT_VIBRATE_STOP:
-            _proto->sendActuatorCommand(targetSlot, act.cmd, nullptr, 0);
+            payloadLen = 0;
             break;
 
         case ACT_AUDIO_SET_TONE: {
@@ -551,12 +545,23 @@ void WearBlocksECA::executeAction(const WBAction& act) {
             buf[0] = freq & 0xFF;          // freq_lo (LE — module_amplifier reads p[0] | p[1]<<8)
             buf[1] = (freq >> 8) & 0xFF;   // freq_hi
             buf[2] = clampByte(vals[1]);   // amp 0..255
-            _proto->sendActuatorCommand(targetSlot, act.cmd, buf, 3);
+            payloadLen = 3;
             break;
         }
         case ACT_AUDIO_STOP:
-            _proto->sendActuatorCommand(targetSlot, act.cmd, nullptr, 0);
+            payloadLen = 0;
             break;
+
+        case ACT_MOTOR_SET: {
+            uint16_t dur = clampU16(vals[3]);
+            buf[0] = clampByte(vals[0]);  // motor: 1 or 2
+            buf[1] = clampByte(vals[1]);  // mode: stop/forward/reverse
+            buf[2] = clampByte(vals[2]);  // PWM duty
+            buf[3] = (dur >> 8) & 0xFF;
+            buf[4] = dur & 0xFF;
+            payloadLen = 5;
+            break;
+        }
 
         // LED RAMP/BREATHE/BLINK/RAINBOW reserved — module_led v3 only
         // implements SOLID. Pass through resolved bytes for forward-compat.
@@ -564,10 +569,27 @@ void WearBlocksECA::executeAction(const WBAction& act) {
             uint8_t n = act.numParams;
             if (n > sizeof(buf)) n = sizeof(buf);
             for (uint8_t i = 0; i < n; i++) buf[i] = clampByte(vals[i]);
-            _proto->sendActuatorCommand(targetSlot, act.cmd, buf, n);
+            payloadLen = n;
             break;
         }
     }
+
+    if (_localActuator &&
+        _localActuator(act.target, act.cmd, buf, payloadLen)) {
+        Serial.printf("[ECA] ACT local cmd=%d (uid=%08lX)\n",
+                      act.cmd, (unsigned long)act.target);
+        return;
+    }
+
+    // The target was not local. Resolve its UID to a registered CAN slot.
+    uint8_t targetSlot = _uidToSlot ? _uidToSlot(act.target) : 0;
+    if (targetSlot == 0) {
+        Serial.printf("[ECA] ACT skip: uid=%08lX not registered\n",
+                      (unsigned long)act.target);
+        return;
+    }
+    _proto->sendActuatorCommand(targetSlot, act.cmd,
+                                payloadLen > 0 ? buf : nullptr, payloadLen);
     Serial.printf("[ECA] ACT slot=%d cmd=%d (uid=%08lX)\n",
                   targetSlot, act.cmd, (unsigned long)act.target);
 }

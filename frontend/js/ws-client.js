@@ -90,9 +90,9 @@ class WsClient {
   /** Wipe persisted bytecode only ($PE); current session keeps running. */
   programEraseNvs() { this.send({ action: 'program_erase_nvs' }); }
 
-  /** Send a simulator-only command (e.g. 'demo1', 'demo2', 'demo3',
+  /** Send a simulator-only command (e.g. 'demo1' through 'demo4',
    *  'clear'). The bridge silently ignores these when not in a --sim
-   *  mode. Used by the D1/D2/D3 preset buttons in the status bar. */
+   *  mode. Used by the D1-D4 preset buttons in the status bar. */
   simCommand(command) {
     this.send({ action: 'sim_command', command });
   }

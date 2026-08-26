@@ -5,7 +5,7 @@
  */
 import { LitElement, html, css } from 'lit';
 import { wsClient } from '../ws-client.js';
-import { DEMO_PROGRAMS } from '../demo-programs.js';
+import { getDemoProgram } from '../demo-programs.js';
 
 export class WbStatusBar extends LitElement {
   static properties = {
@@ -15,6 +15,7 @@ export class WbStatusBar extends LitElement {
     frameCount:  { type: Number },
     theme:       { type: String, state: true },
     transport:   { type: Object, state: true },
+    modules:     { type: Array },
     eca:         { type: Object, state: true },
     oscActive:   { type: Number },
   };
@@ -185,6 +186,7 @@ export class WbStatusBar extends LitElement {
     this.frameCount = 0;
     this.theme = (window.themeController && window.themeController.current()) || 'light';
     this.transport = { transport: null, label: null, connected: false };
+    this.modules = [];
     this.eca = { has_program: false, running: false, num_rules: 0, num_vcs: 0, nvs_stored: false };
     this.oscActive = 0;
     this._onThemeChange = (e) => { this.theme = e.detail.theme; };
@@ -202,13 +204,14 @@ export class WbStatusBar extends LitElement {
 
   _runDemo(name) {
     wsClient.simCommand(name);
-    const state = DEMO_PROGRAMS[name];
-    if (!state) return;
+    if (!getDemoProgram(name, this.modules)) return;
     // Wait for the bridge's clear→add HELLO/descriptor round-trip so
     // the live module dropdowns refresh before the program loads. The
     // sim adds modules with ~300 ms spacing per type, so 1.5 s is a
     // safe upper bound for the largest preset (D3 = 3 modules).
     setTimeout(() => {
+      const state = getDemoProgram(name, this.modules);
+      if (!state) return;
       window.dispatchEvent(new CustomEvent('wb-load-demo-program', {
         detail: { state },
       }));
@@ -302,6 +305,13 @@ export class WbStatusBar extends LitElement {
           ?disabled=${!this.connected}
           @click=${() => this._runDemo('demo3')}
         >D3 Motion Alert</button>
+
+        <button
+          class="demo-btn"
+          title="Demo 4: load independent timed M1/M2 actions; the simulator attaches a motor hub automatically."
+          ?disabled=${!this.connected}
+          @click=${() => this._runDemo('demo4')}
+        >D4 Dual Motor Test</button>
 
         <button
           class="rediscover"

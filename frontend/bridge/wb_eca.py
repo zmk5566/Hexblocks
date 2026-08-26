@@ -69,6 +69,8 @@ class Act(IntEnum):
     LED_BLINK = 4; LED_RAINBOW = 5; LED_STOP = 6
     VIBRATE = 16; VIBRATE_PULSE = 17; VIBRATE_RAMP = 18; VIBRATE_STOP = 19
     VAR_SET = 32; VAR_INC = 33; VAR_RESET = 34; VAR_TOGGLE = 35
+    AUDIO_SET_TONE = 48; AUDIO_STOP = 49
+    MOTOR_SET = 64
 
 
 TRANSIENT_CHANNELS = {
@@ -481,8 +483,6 @@ class ECAEngine:
 
     def _evaluate_conditions(self, rule: Rule, rule_idx: int,
                              now_ms: int) -> bool:
-        if not rule.conditions:
-            return False
         result = True if rule.logic == Logic.AND else False
         for cond in rule.conditions:
             val = self._resolve_ref(cond.ref_type, cond.id, cond.channel_id)
@@ -505,7 +505,7 @@ class ECAEngine:
                 result = result or met
 
         # hold_ms: condition must stay true for N ms before firing
-        hold = rule.conditions[0].hold_ms
+        hold = rule.conditions[0].hold_ms if rule.conditions else 0
         if hold > 0:
             if result:
                 if not self._cond_active[rule_idx]:

@@ -8,6 +8,7 @@ import { LitElement, html, css } from 'lit';
 export class WbPalette extends LitElement {
   static properties = {
     modules: { type: Array },
+    hubPresent: { type: Boolean },
   };
 
   static styles = css`
@@ -116,6 +117,7 @@ export class WbPalette extends LitElement {
   constructor() {
     super();
     this.modules = [];
+    this.hubPresent = false;
   }
 
   render() {
@@ -126,14 +128,22 @@ export class WbPalette extends LitElement {
         <span class="title">Modules</span>
         <span class="badge">${count}</span>
       </div>
-      <div class="hub-row" title="Hub — runs the ECA engine and routes child modules">
-        <span class="hub-dot"></span>
-        <div class="hub-text">
-          <span class="hub-name">Hub</span>
-          <span class="hub-meta">ECA engine · ${count} module${count === 1 ? '' : 's'}</span>
+      ${this.hubPresent ? html`
+        <div class="hub-row" title="Hub — runs the ECA engine and routes child modules">
+          <span class="hub-dot"></span>
+          <div class="hub-text">
+            <span class="hub-name">Hub</span>
+            <span class="hub-meta">ECA engine · ${count} module${count === 1 ? '' : 's'}</span>
+          </div>
         </div>
-      </div>
-      ${count === 0
+      ` : ''}
+      ${!this.hubPresent
+        ? html`
+          <div class="empty-state">
+            <div class="dot"></div>
+            <p>Connect a hub to begin</p>
+          </div>`
+        : count === 0
         ? html`
           <div class="empty-state">
             <div class="dot"></div>

@@ -10,6 +10,7 @@
  */
 import { LitElement, html, svg, css } from 'lit';
 import { programToBase64, REF, VC_OP, COND_OP, LOGIC, ACT } from '../eca-encoder.js';
+import { shouldKeepRule } from '../eca-rule-utils.js';
 import { wsClient } from '../ws-client.js';
 import { dispatchOpenPanel } from './open-panel.js';
 import {
@@ -62,6 +63,7 @@ const HEX_R = 44;
 // existing footprint, while the inner fill shrinks inward to make color weightier.
 const MOD_COLOR_BAND = 8;
 const AUDIO_MODULE_COLOR = '#9885BF';
+const MOTOR_MODULE_COLOR = '#D97757';
 // Edge-touching distance: R * sqrt(3) for pointy-top hexes sharing a flat edge
 const HEX_DIST_COMPACT = HEX_R * Math.sqrt(3) + 2;  // +2px grid-line gap
 const HEX_DIST_SPACED  = 115;
@@ -108,6 +110,17 @@ export class WbBlockCanvas extends LitElement {
       display: block;
       cursor: grab;
       user-select: none;
+    }
+
+    .topology-empty {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--wb-text-dim);
+      font-size: 0.8rem;
+      pointer-events: none;
     }
 
     /* zoom controls */
@@ -356,6 +369,7 @@ export class WbBlockCanvas extends LitElement {
 
   static properties = {
     modules:       { type: Array },
+    hubPresent:    { type: Boolean },
     hubProgramKnown: { type: Boolean },
     hubHasProgram: { type: Boolean },
     pendingDetach: { type: Object },  // Set<slot>
@@ -376,6 +390,7 @@ export class WbBlockCanvas extends LitElement {
   constructor() {
     super();
     this.modules = [];
+    this.hubPresent = false;
     this.hubProgramKnown = false;
     this.hubHasProgram = false;
     this.pendingDetach = new Set();
@@ -819,11 +834,13 @@ export class WbBlockCanvas extends LitElement {
              @mousedown=${this._onPanDown}>
           <g style="transform: ${transform}; transform-origin: center;">
             ${this._renderBgPattern()}
-            ${this._renderFaces()}
-            ${this._renderHub()}
+            ${this.hubPresent ? this._renderFaces() : ''}
+            ${this.hubPresent ? this._renderHub() : ''}
           </g>
         </svg>
-        <div class="zoom-controls">
+        ${!this.hubPresent ? html`
+          <div class="topology-empty">Connect a hub to begin</div>
+        ` : html`<div class="zoom-controls">
           <button class="zoom-btn" @click=${() => { this._scale = Math.min(4, this._scale * 1.2); }}>+</button>
           <button class="zoom-btn" @click=${() => this._resetView()} title="Reset view">⊙</button>
           <button class="zoom-btn" @click=${() => { this._scale = Math.max(0.3, this._scale / 1.2); }}>−</button>
@@ -836,7 +853,7 @@ export class WbBlockCanvas extends LitElement {
                   title="Resync topology from hub">
             ↻
           </button>
-        </div>
+        </div>`}
       </div>
 
       <div class="divider" @mousedown=${this._onDivDown}></div>
@@ -1205,7 +1222,7 @@ export class WbBlockCanvas extends LitElement {
   }
 
   /** Replace the workspace with a serialized Blockly state. Used by the
-   *  D1/D2/D3 demo buttons in <wb-status-bar> via the
+   *  D1-D4 demo buttons in <wb-status-bar> via the
    *  `wb-load-demo-program` window event. The state is a v3 serialization
    *  object as produced by `Blockly.serialization.workspaces.save`. */
   _loadProgramJson(state) {
@@ -1483,6 +1500,32 @@ export class WbBlockCanvas extends LitElement {
       },
     };
 
+    Blockly.Blocks['motor_action'] = {
+      init() {
+        const self = this;
+        const slotField = new Blockly.FieldDropdown(() => {
+          const opts = slotOptions('motor');
+          return withGhost(opts, self.getFieldValue?.('SLOT'));
+        });
+        this.appendDummyInput()
+          .appendField('Motor on')
+          .appendField(slotField, 'SLOT')
+          .appendField(new Blockly.FieldDropdown([
+            ['M1', '1'], ['M2', '2'],
+          ]), 'MOTOR')
+          .appendField(new Blockly.FieldDropdown([
+            ['stop', '0'], ['forward', '1'], ['reverse', '2'],
+          ]), 'MODE');
+        this.appendDummyInput()
+          .appendField('speed').appendField(new Blockly.FieldNumber(128, 0, 255, 1), 'SPEED')
+          .appendField('duration').appendField(new Blockly.FieldNumber(1000, 0, 65535, 1), 'DURATION')
+          .appendField('ms');
+        this.setPreviousStatement(true, 'action');
+        this.setNextStatement(true, 'action');
+        this.setColour(MOTOR_MODULE_COLOR);
+      },
+    };
+
     Blockly.Blocks['variable_action'] = {
       init() {
         this.appendDummyInput()
@@ -1636,6 +1679,7 @@ export class WbBlockCanvas extends LitElement {
         { kind: 'category', name: 'LED',       colour: 0,   contents: [{ kind: 'block', type: 'led_action' }] },
         { kind: 'category', name: 'Vibration', colour: 130, contents: [{ kind: 'block', type: 'vibrate_action' }] },
         { kind: 'category', name: 'Sound',     colour: AUDIO_MODULE_COLOR, contents: [{ kind: 'block', type: 'audio_action' }] },
+        { kind: 'category', name: 'Motors',    colour: MOTOR_MODULE_COLOR, contents: [{ kind: 'block', type: 'motor_action' }] },
         { kind: 'category', name: 'Variables', colour: 60,  contents: [{ kind: 'block', type: 'variable_action' }] },
       ],
     };
@@ -1874,6 +1918,17 @@ export class WbBlockCanvas extends LitElement {
             ];
           }
           actions.push({ target, cmd, params });
+        } else if (actBlock.type === 'motor_action') {
+          actions.push({
+            target: actBlock.getFieldValue('SLOT'),
+            cmd: 'MOTOR_SET',
+            params: [
+              constParam(actBlock.getFieldValue('MOTOR')),
+              constParam(actBlock.getFieldValue('MODE')),
+              constParam(actBlock.getFieldValue('SPEED')),
+              constParam(actBlock.getFieldValue('DURATION')),
+            ],
+          });
         } else if (actBlock.type === 'variable_action') {
           const cmd = actBlock.getFieldValue('CMD');
           // VAR_*: target's low byte = var_id (small integer 0-7).
@@ -1887,7 +1942,7 @@ export class WbBlockCanvas extends LitElement {
         actBlock = actBlock.getNextBlock();
       }
 
-      if (conditions.length > 0 && actions.length > 0) {
+      if (shouldKeepRule(conditions, actions)) {
         rules.push({ conditions, logic, actions });
       }
     }
@@ -2212,6 +2267,7 @@ const MODULE_TOKEN_ALIASES = {
   haptic: ['vib', 'vibration', 'haptic', 'haptic_output'],
   audio: ['audio', 'audio_output', 'speaker', 'tone'],
   speaker: ['audio', 'audio_output', 'speaker', 'tone'],
+  motor: ['motor', 'dual_motor', 'motor_output', 'dc_motor'],
   sensor: ['sensor'],
 };
 
@@ -2276,6 +2332,7 @@ function _roleForActionCmd(cmd) {
   if (name.startsWith('LED_')) return 'led';
   if (name.startsWith('VIBRATE')) return 'vib';
   if (name.startsWith('AUDIO')) return 'audio';
+  if (name.startsWith('MOTOR_')) return 'motor';
   return null;
 }
 
@@ -2560,6 +2617,18 @@ function _buildActBlock(action, uidByName) {
       setRichParam(1, 'AMP',  fields, inputs);
     }
     return { type: 'audio_action', fields, inputs };
+  }
+  if (cmdName === 'MOTOR_SET') {
+    return {
+      type: 'motor_action',
+      fields: {
+        SLOT: String(resolvedTarget),
+        MOTOR: String(Math.max(1, Math.min(2, Math.round(cv(0) || 1)))),
+        MODE: String(Math.max(0, Math.min(2, Math.round(cv(1))))),
+        SPEED: Math.max(0, Math.min(255, Math.round(cv(2)))),
+        DURATION: Math.max(0, Math.min(65535, Math.round(cv(3)))),
+      },
+    };
   }
   if (cmdName.startsWith('VAR_')) {
     return {
