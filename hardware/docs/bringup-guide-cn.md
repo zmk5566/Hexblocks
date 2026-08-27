@@ -10,9 +10,10 @@
 
 | 板子 | sketch 路径 | 目标芯片 |
 |---|---|---|
-| Hub | `hardware/firmware/hub/hub.ino` | ESP32-C3-MINI-1 |
+| 有线 Hub（默认） | `hardware/firmware/hub/hub.ino` | ESP32-C3-MINI-1 |
+| Wi-Fi/OSC Hub | `hardware/firmware/wifi_hub/wifi_hub.ino` | ESP32-C3-MINI-1 |
 
-烧录前安装的 lib：把 `hardware/firmware/lib/` 下的 `WearBlocksCAN`、`WearBlocksProtocol`、`WearBlocksDescriptor`、`WearBlocksModule`、`WearBlocksECA`、`WearBlocksPosID`、`WearBlocksWireless` 软链或拷到 Arduino libraries 目录。
+烧录前安装的 lib：把 `hardware/firmware/lib/` 下的 `WearBlocksCAN`、`WearBlocksProtocol`、`WearBlocksDescriptor`、`WearBlocksModule`、`WearBlocksECA`、`WearBlocksPosID`、`WearBlocksTransport` 软链或拷到 Arduino libraries 目录。只有 `wifi_hub` 和支持无线回退的模块还需要 `WearBlocksWireless`。
 
 ### 0.2 烧录模块固件
 

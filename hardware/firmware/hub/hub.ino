@@ -56,17 +56,28 @@
  *                           send logger topic allowlist over SYS_CONFIG
  */
 
+#ifndef WB_HUB_ENABLE_WIFI_OSC
+#define WB_HUB_ENABLE_WIFI_OSC 0
+#endif
+
+#ifndef WB_HUB_VARIANT_NAME
+#define WB_HUB_VARIANT_NAME "WearBlocks Hub v2 (wired, UID-keyed)"
+#endif
+
 #include <WearBlocksCAN.h>
 #include <WearBlocksProtocol.h>
 #include <WearBlocksDescriptor.h>
 #include <WearBlocksECA.h>
 #include <WearBlocksLogger.h>
+#include <WearBlocksTransport.h>
+#if WB_HUB_ENABLE_WIFI_OSC
 #include <WearBlocksWireless.h>
-#include <Preferences.h>
-#include <mbedtls/base64.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <esp_system.h>
+#endif
+#include <Preferences.h>
+#include <mbedtls/base64.h>
 #include "ModuleRegistry.h"
 
 // ── BLE peripheral ────────────────────────────────���───────────
@@ -363,6 +374,11 @@ static bool eraseTopoMemory() {
 uint32_t sampleCount = 0;
 uint32_t statsStart = 0;
 
+// LoRa logger configuration remains available in both Hub variants.
+static uint32_t g_loggerConfigRev[WB_MAX_MODULES] = {};
+static uint8_t  g_loggerProvisionSession[WB_MAX_MODULES] = {};
+
+#if WB_HUB_ENABLE_WIFI_OSC
 // ── Wi-Fi / OSC fallback ───────────────────────────────────────
 static WiFiUDP g_wifiUdp;
 static bool    g_wifiApRunning = false;
@@ -376,9 +392,8 @@ static uint16_t g_wifiMsgId = 1;
 static uint32_t g_wifiLastSensorSeq[WB_MAX_MODULES][WB_CH_MAX] = {};
 static uint32_t g_wifiProvisionCrc[WB_MAX_MODULES] = {};
 static uint32_t g_wifiProvisionAtMs[WB_MAX_MODULES] = {};
-static uint32_t g_loggerConfigRev[WB_MAX_MODULES] = {};
-static uint8_t  g_loggerProvisionSession[WB_MAX_MODULES] = {};
 static const uint32_t WB_CAN_LINK_STALE_MS = 3000;
+#endif
 
 // ── uid → hex helper ──────────────────────────────────────────
 static void formatUidHex(uint32_t uid, char* buf, size_t len) {
@@ -435,6 +450,7 @@ static void emitModuleIdentity(Print& p, const RegisteredModule* m) {
     p.printf("$I,%s,%s,%s,%04X\n", uidHex(m->uid), moduleId, version, m->fwHash);
 }
 
+#if WB_HUB_ENABLE_WIFI_OSC
 static void emitWirelessState(Print& p, const RegisteredModule* m) {
     if (!m) return;
     char ipBuf[24] = "";
@@ -451,6 +467,9 @@ static void emitWirelessState(Print& p, const RegisteredModule* m) {
              ipBuf,
              (unsigned)m->wifiPort);
 }
+#else
+static void emitWirelessState(Print&, const RegisteredModule*) {}
+#endif
 
 static void emitModuleHello(Print& p, const RegisteredModule* m) {
     if (!m) return;
@@ -461,9 +480,11 @@ static void emitModuleHello(Print& p, const RegisteredModule* m) {
     emitWirelessState(p, m);
 }
 
+#if WB_HUB_ENABLE_WIFI_OSC
 static bool moduleHasWifiEndpoint(const RegisteredModule* m) {
     return m && m->wifiIp != 0 && m->wifiPort != 0;
 }
+#endif
 
 static bool moduleIsLogger(const RegisteredModule* m) {
     if (!m || !m->hasDescriptor) return false;
@@ -480,6 +501,7 @@ static bool moduleIsLogger(const RegisteredModule* m) {
     return false;
 }
 
+#if WB_HUB_ENABLE_WIFI_OSC
 static bool isTransportModeText(const char* mode) {
     return mode &&
            (strcmp(mode, "can_only") == 0 ||
@@ -612,12 +634,28 @@ static bool provisionWirelessForSlot(uint8_t slot, bool force = false) {
     }
     return ok;
 }
+#else
+static bool shouldAcceptCanSensor(const RegisteredModule*) {
+    return true;
+}
+
+static void noteCanSeenForSlot(uint8_t slot, uint32_t now) {
+    registry.noteLinkSeen(slot, WB_LINK_CAN, now);
+    registry.setActiveLink(slot, WB_LINK_CAN);
+}
+
+static bool provisionWirelessForSlot(uint8_t, bool = false) {
+    return false;
+}
+#endif
 
 static bool forwardLoggerRecord(uint32_t sourceUid, uint8_t channelId,
                                 uint8_t recordType, uint8_t flags,
                                 float value);
 void broadcastSlotUidMap();
 void emitLoggerInfo();
+void onSlotDetached(uint32_t uid);
+void onSlotRemoved(uint32_t uid);
 
 void onSysConfigAck(uint8_t moduleSlot, uint8_t status, uint8_t sessionId) {
     const RegisteredModule* m = registry.getModule(moduleSlot);
@@ -629,9 +667,15 @@ void onSysConfigAck(uint8_t moduleSlot, uint8_t status, uint8_t sessionId) {
                       (unsigned)status, (unsigned)sessionId,
                       (unsigned long)g_loggerConfigRev[moduleSlot]);
     } else {
+#if WB_HUB_ENABLE_WIFI_OSC
         Serial.printf("[WIFI] provision ack slot=%u uid=%s status=%u session=%u\n",
                       (unsigned)moduleSlot, m ? uidHex(m->uid) : "????????",
                       (unsigned)status, (unsigned)sessionId);
+#else
+        Serial.printf("[SYS-CONFIG] ack slot=%u uid=%s status=%u session=%u\n",
+                      (unsigned)moduleSlot, m ? uidHex(m->uid) : "????????",
+                      (unsigned)status, (unsigned)sessionId);
+#endif
     }
 }
 
@@ -1039,6 +1083,9 @@ void onModuleHello(const HelloMessage& msg) {
 
     if (!fromMemory) commitAttach(attachIdx);
     registry.addPending(msg.uid, newSlot, msg.fwHash, parentSlot, parentFace);
+#if !WB_HUB_ENABLE_WIFI_OSC
+    registry.setTransportMode(newSlot, WB_TRANSPORT_CAN_ONLY);
+#endif
     noteCanSeenForSlot(newSlot, now);
     protocol.sendAck(newSlot, msg.uid, /*descriptorCached=*/false);
     provisionWirelessForSlot(newSlot);
@@ -1421,6 +1468,7 @@ bool handleLoggerHostCommand(const char* cmd) {
     return false;
 }
 
+#if WB_HUB_ENABLE_WIFI_OSC
 bool handleWirelessHostCommand(const char* cmd) {
     if (strcmp(cmd, "$W,INFO") == 0) {
         IPAddress ip = WiFi.softAPIP();
@@ -1481,6 +1529,20 @@ bool handleWirelessHostCommand(const char* cmd) {
 
     return false;
 }
+#else
+bool handleWirelessHostCommand(const char* cmd) {
+    if (strncmp(cmd, "$W,", 3) != 0) return false;
+    if (strcmp(cmd, "$W,INFO") == 0) {
+        // The companion queries this automatically on connect.  Give it an
+        // explicit capability result so a wired Hub never exposes controls
+        // that this firmware cannot execute.
+        out.println("$WIFI,DISABLED");
+        return true;
+    }
+    out.println("$ERR W unavailable_on_wired_hub");
+    return true;
+}
+#endif
 
 // Resolve "<uidHex>" arg to a slot. Returns 0xFF if not found.
 uint8_t resolveUidArg(const char* uidStr) {
@@ -1839,6 +1901,7 @@ void processBleCommands() {
 }
 
 // ── Wi-Fi / OSC fallback implementation ───────────────────────
+#if WB_HUB_ENABLE_WIFI_OSC
 static const char* oscStringArg(const WBOscMessage& msg, uint8_t idx) {
     if (idx >= msg.argc || msg.args[idx].type != 's') return "";
     return msg.args[idx].s;
@@ -2207,6 +2270,28 @@ static void processWifiUdp() {
         packetLen = g_wifiUdp.parsePacket();
     }
 }
+#else
+static bool dispatchActuatorForLink(uint8_t slot, uint32_t, uint8_t cmd,
+                                    const uint8_t* params, uint8_t paramLen) {
+    if (slot == 0 || slot >= WB_MAX_MODULES) return false;
+    protocol.sendActuatorCommand(slot, cmd, params, paramLen);
+    return true;
+}
+
+static bool dispatchTopicForLink(uint8_t slot, uint32_t, uint8_t channelId,
+                                 bool enable) {
+    if (slot == 0 || slot >= WB_MAX_MODULES) return false;
+    if (enable) protocol.sendTopicEnable(slot, channelId);
+    else        protocol.sendTopicDisable(slot, channelId);
+    return true;
+}
+
+static void wifiSetup() {
+    Serial.println("[OK] Hub transport: wired CAN only (Wi-Fi/OSC disabled)");
+}
+
+static void processWifiUdp() {}
+#endif
 
 // ── Setup ─────────────────────────────────────────────────────
 void setup() {
@@ -2214,7 +2299,7 @@ void setup() {
     delay(500);
     Serial.println();
     Serial.println("========================================");
-    Serial.println("  WearBlocks Hub v2 (UID-keyed)");
+    Serial.printf("  %s\n", WB_HUB_VARIANT_NAME);
     Serial.println("========================================");
 
     if (STATUS_LED != 255) {

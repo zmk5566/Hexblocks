@@ -500,6 +500,7 @@ export class WbConfigPanel extends LitElement {
   _renderModule() {
     const mod = this._module();
     if (!mod) return html`<div class="empty">Module is no longer connected.</div>`;
+    const wifiSupported = this.wifiInfo?.supported === true || !!this.wifiInfo?.ssid;
     const activeLink = mod.active_link || 'none';
     const mode = mod.transport_mode || 'can_primary_wifi_fallback';
     const topology = mod.topology_state || (mod.parent_remote ? 'remote_unplaced' : 'physical');
@@ -520,15 +521,17 @@ export class WbConfigPanel extends LitElement {
         </div>
       </section>
 
-      <section>
-        <h3>Transport mode</h3>
-        <div class="config-row">
-          <select .value=${mode} @change=${e => this._applyModule(e.target.value)}>
-            ${this._modeOptions(mode)}
-          </select>
-          <button class="act" @click=${() => wsClient.wirelessInfo()}>refresh</button>
-        </div>
-      </section>
+      ${wifiSupported ? html`
+        <section>
+          <h3>Transport mode</h3>
+          <div class="config-row">
+            <select .value=${mode} @change=${e => this._applyModule(e.target.value)}>
+              ${this._modeOptions(mode)}
+            </select>
+            <button class="act" @click=${() => wsClient.wirelessInfo()}>refresh</button>
+          </div>
+        </section>
+      ` : ''}
 
       ${this._renderLoggerTopics(mod)}
     `;

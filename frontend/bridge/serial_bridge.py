@@ -741,7 +741,7 @@ def parse_line(raw: str):
         topo_snapshot_uids.clear()
         return msg
 
-    # child_stack, child_unstack, command_ack, wifi_ap/pass/token:
+    # child_stack, child_unstack, command_ack, wifi_ap/pass/token/disabled:
     # pass through unchanged.
     return msg
 

@@ -34,14 +34,14 @@ The core design goal is semantic continuity: physical modules, authoring referen
 
 ```
 hardware/             ESP32-C3 firmware (hub + 7 module types) and PCB
-  firmware/hub/       hub.ino, ModuleRegistry — CAN master, BLE/USB link,
-                      Wi-Fi/OSC fallback host
+  firmware/hub/       six-face wired Hub — CAN master, BLE/USB, ECA
+  firmware/wifi_hub/  same shared Hub core plus Wi-Fi/OSC fallback
   firmware/motor_hub/ one-face BLE/USB hub with a built-in dual-motor actuator
   firmware/module_*/  per-module sketches (imu, led, vibration, motor,
                       amplifier, light_resistor, resistor)
   firmware/lib/       shared C++ libraries: WearBlocksCAN, *Protocol,
                       *Descriptor, *Module, *ECA (bytecode interpreter),
-                      *Wireless (Wi-Fi/OSC transport helpers)
+                      *Transport policy and optional *Wireless runtime
   pcb/                board files
 schematics/           KiCad project (board + schematic)
 openscad-model/       hex enclosure SCAD sources + exported STL
@@ -95,7 +95,10 @@ python -m pytest test_wb_eca.py test_osc_bridge.py test_llm_bridge.py
 
 The hub evaluates rules locally. A companion computer is only needed to author or inspect the program.
 
-1. **Flash the hub.** Connect the hub board over USB-C and flash `hardware/firmware/hub/hub.ino` for the ESP32-C3 target. With `arduino-cli`:
+1. **Flash the hub.** Connect the hub board over USB-C. The default
+   `hardware/firmware/hub` target is the deterministic wired build: CAN module
+   bus plus USB/BLE companion link, with no Wi-Fi SoftAP or OSC listener.
+   Compile it for ESP32-C3 with `arduino-cli`:
 
    ```bash
    # Install the core once
@@ -106,6 +109,17 @@ The hub evaluates rules locally. A companion computer is only needed to author o
      --libraries hardware/firmware/lib hardware/firmware/hub
    arduino-cli upload --fqbn esp32:esp32:esp32c3 \
      -p /dev/cu.usbmodem* hardware/firmware/hub
+   ```
+
+   To enable module-to-Hub Wi-Fi/OSC fallback, compile and upload
+   `hardware/firmware/wifi_hub` instead. Both targets share the same Hub and
+   registry implementation; `wifi_hub` only selects the wireless adapter.
+
+   ```bash
+   arduino-cli compile --fqbn esp32:esp32:esp32c3 \
+     --libraries hardware/firmware/lib hardware/firmware/wifi_hub
+   arduino-cli upload --fqbn esp32:esp32:esp32c3 \
+     -p /dev/cu.usbmodem* hardware/firmware/wifi_hub
    ```
 
    For the standalone ESP32-C3FH4 + DRV8410 board, compile and upload
@@ -181,7 +195,10 @@ Same hardware setup as Mode A. The hub keeps any uploaded program running; the b
 
 No `platformio.ini` is committed — the canonical build path is `arduino-cli` against the per-sketch directories under `hardware/firmware/`. Shared libraries live in `hardware/firmware/lib/` and must be passed via `--libraries` (see commands above). Target board: `esp32:esp32:esp32c3` (ESP32-C3-MINI-1). The hub additionally requires NimBLE-Arduino; install it once with `arduino-cli lib install "NimBLE-Arduino"`.
 
-PlatformIO users can build the same sketches by adding each `module_*` and `hub` directory as a PlatformIO environment with `framework = arduino` and `board = esp32-c3-devkitm-1`; no project file is provided.
+PlatformIO users can build the same sketches by adding each `module_*`, `hub`,
+`wifi_hub`, and `motor_hub` directory as a PlatformIO environment with
+`framework = arduino` and `board = esp32-c3-devkitm-1`; no project file is
+provided.
 
 ### Bridge
 

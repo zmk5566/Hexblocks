@@ -272,6 +272,7 @@ export class WbApp extends LitElement {
     this._ecaStatus = null;
     this._ecaRules = null;
     this._lastEcaBytecodeB64 = '';
+    this._wifiInfo = {};
   }
 
   _handleMessage(msg) {
@@ -728,6 +729,7 @@ export class WbApp extends LitElement {
       case 'wifi_ap':
         this._wifiInfo = {
           ...this._wifiInfo,
+          supported: true,
           ssid: msg.ssid,
           ip: msg.ip,
           port: msg.port,
@@ -736,14 +738,22 @@ export class WbApp extends LitElement {
       case 'wifi_pass':
         this._wifiInfo = {
           ...this._wifiInfo,
+          supported: true,
           password: msg.password,
         };
         break;
       case 'wifi_token':
         this._wifiInfo = {
           ...this._wifiInfo,
+          supported: true,
           token: msg.token,
         };
+        break;
+      case 'wifi_disabled':
+        this._wifiInfo = { supported: false };
+        this._configOpen = this._configTargetType === 'hub'
+          ? false
+          : this._configOpen;
         break;
       case 'query_done': {
         const command = String(msg.command || '').toUpperCase();

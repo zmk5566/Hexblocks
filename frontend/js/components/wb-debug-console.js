@@ -344,6 +344,9 @@ export class WbDebugConsole extends LitElement {
         this._pushEvent('wireless',
           `$WIFI TOKEN ${this._maskSecret(msg.token)}`);
         break;
+      case 'wifi_disabled':
+        this._pushEvent('wireless', '$WIFI DISABLED (wired Hub)');
+        break;
       case 'query_done':
         this._pushEvent('done', '$Q DONE');
         break;

@@ -248,6 +248,8 @@ def parse_line(raw: str) -> dict | None:
 
     if tag == "WIFI":
         parts = line[1:].split(",", 4)
+        if len(parts) >= 2 and parts[1] == "DISABLED":
+            return {"type": "wifi_disabled"}
         if len(parts) >= 4 and parts[1] == "AP":
             try:
                 port = int(parts[4]) if len(parts) >= 5 else 0
@@ -377,6 +379,7 @@ def _selftest() -> None:
                   "ip": "192.168.4.1", "port": 9000}, ap
     pw = parse_line("$WIFI,PASS,hex-ABCDEF0123456789")
     assert pw == {"type": "wifi_pass", "password": "hex-ABCDEF0123456789"}, pw
+    assert parse_line("$WIFI,DISABLED") == {"type": "wifi_disabled"}
 
     e = parse_line("$E,1,1,3,2,128,1")
     assert (e["type"] == "eca_status" and e["running"] and e["has_program"]

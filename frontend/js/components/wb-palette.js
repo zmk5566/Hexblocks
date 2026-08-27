@@ -165,6 +165,7 @@ export class WbPalette extends LitElement {
   render() {
     const count = this.modules.length;
     const wifi = this.wifiInfo || {};
+    const wifiSupported = wifi.supported === true || !!wifi.ssid;
     const wifiMeta = wifi.ssid
       ? `${wifi.ssid} · ${wifi.ip || '0.0.0.0'}:${wifi.port || 0}`
       : 'Wi-Fi AP pending';
@@ -183,11 +184,15 @@ export class WbPalette extends LitElement {
           <div class="hub-text">
             <span class="hub-name">Hub</span>
             <span class="hub-meta">ECA engine · ${count} module${count === 1 ? '' : 's'}</span>
-            <span class="hub-wifi" title=${wifiTitle}>${wifiMeta}</span>
+            ${wifiSupported
+              ? html`<span class="hub-wifi" title=${wifiTitle}>${wifiMeta}</span>`
+              : ''}
           </div>
-          <button class="hub-info-btn"
-                  title="Open hub info and configuration"
-                  @click=${this._openHubInfo}>info</button>
+          ${wifiSupported ? html`
+            <button class="hub-info-btn"
+                    title="Open hub info and configuration"
+                    @click=${this._openHubInfo}>info</button>
+          ` : ''}
         </div>
       ` : ''}
       ${!this.hubPresent

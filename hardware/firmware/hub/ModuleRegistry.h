@@ -4,7 +4,7 @@
 #include <Arduino.h>
 #include <WearBlocksDescriptor.h>
 #include <WearBlocksProtocol.h>
-#include <WearBlocksWireless.h>
+#include <WearBlocksTransport.h>
 
 #define WB_MAX_MODULES 12
 #define WB_NUM_FACES 6
