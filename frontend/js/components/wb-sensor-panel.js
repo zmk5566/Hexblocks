@@ -20,7 +20,7 @@ const FIELD_COLORS = [
 export class WbSensorPanel extends LitElement {
   static properties = {
     sensorData:     { type: Object },
-    actuatorState:  { type: Object },  // { led: {...}, vib: {...} } from bridge actuator_state
+    actuatorState:  { type: Object },  // { led: {...}, vib: {...}, motors: {...} }
     slot:           { type: Number },
     module:         { type: Object },
     closeable:      { type: Boolean },
@@ -539,10 +539,12 @@ export class WbSensorPanel extends LitElement {
     const hasLed = caps.some(c => c.t === 'actuator' && (c.m || '').includes('light'));
     const hasVib = caps.some(c => c.t === 'actuator' && (c.m || '').includes('vibration'));
     const hasAudio = caps.some(c => c.t === 'actuator' && (c.m || '').includes('audio'));
+    const hasMotor = caps.some(c => c.t === 'actuator' && (c.m || '').includes('motor'));
     const st = this.actuatorState || {};
     const led = st.led || { mode: 'off', r: 0, g: 0, b: 0, brightness: 0, until_ms: 0 };
     const vib = st.vib || { mode: 'off', intensity: 0, until_ms: 0 };
     const audio = st.audio || { mode: 'off', frequency_hz: 0, amplitude: 0, until_ms: 0 };
+    const motors = st.motors || {};
     const now = Date.now();
 
     const ledOn = led.mode && led.mode !== 'off';
@@ -600,6 +602,25 @@ export class WbSensorPanel extends LitElement {
             </div>
           </div>
         ` : ''}
+        ${hasMotor ? [1, 2].map(index => {
+          const motor = motors[String(index)] || motors[index] ||
+            { mode: 'stop', speed: 0, until_ms: 0 };
+          const remaining = (motor.until_ms && motor.until_ms > now)
+            ? Math.max(0, motor.until_ms - now) : 0;
+          const pct = Math.min(100, Math.round(((motor.speed || 0) / 255) * 100));
+          return html`
+            <div class="actuator-card">
+              <div class="actuator-label">Motor ${index}</div>
+              <div class="vib-bar-wrap">
+                <div class="vib-bar" style="width: ${pct}%;"></div>
+              </div>
+              <div class="led-meta">
+                <span class="mode">${motor.mode || 'stop'}</span>
+                ${motor.mode !== 'stop' ? html` · ${motor.speed}/255` : ''}
+                ${remaining > 0 ? html` · ${remaining}ms` : ''}
+              </div>
+            </div>`;
+        }) : ''}
       </div>
     `;
   }

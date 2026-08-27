@@ -17,6 +17,7 @@ export let SENSOR_CAPS = [];
 export let LED_CAPS = [];
 export let VIB_CAPS = [];
 export let AUDIO_CAPS = [];
+export let MOTOR_CAPS = [];
 let CHANNEL_FIELD_NAME = {};
 
 let _catalogLoaded = null;  // Promise<void>, memoized
@@ -36,6 +37,8 @@ const CAPABILITY_ALIASES = {
   haptic: ['haptic', 'haptic_output', 'vib', 'vibration'],
   audio: ['audio', 'audio_output', 'speaker', 'tone'],
   speaker: ['speaker', 'audio', 'audio_output'],
+  motor: ['motor', 'dual_motor', 'motor_output', 'dc_motor'],
+  dual_motor: ['dual_motor', 'motor', 'motor_output', 'dc_motor'],
 };
 
 export function setDropdownGhosts(ghosts) {
@@ -86,6 +89,7 @@ function _applyCatalog(cat) {
   LED_CAPS = actCaps.led || [];
   VIB_CAPS = actCaps.vibration || [];
   AUDIO_CAPS = actCaps.audio || [];
+  MOTOR_CAPS = actCaps.motor || [];
 
   const fieldNames = {};
   for (const entry of Object.values(channels)) {
@@ -177,6 +181,7 @@ export function moduleHasRole(mod, role) {
   if (role === 'led')    return hasAny(LED_CAPS);
   if (role === 'vib')    return hasAny(VIB_CAPS);
   if (role === 'audio')  return hasAny(AUDIO_CAPS);
+  if (role === 'motor')  return hasAny(MOTOR_CAPS);
   return false;
 }
 

@@ -191,6 +191,8 @@ COLOR_MAP = {
     "wireless_uplink": "#4FA7A1", "logger": "#4FA7A1",
     "lora": "#4FA7A1", "loralog": "#4FA7A1",
     "lora_uplink": "#4FA7A1", "batch_log": "#4FA7A1",
+    "motor": "#D97757", "dual_motor": "#D97757",
+    "motor_output": "#D97757",
     "knob": "#98AF6F", "rotary": "#98AF6F",
     "input_control": "#98AF6F", "pot": "#98AF6F",
     "hub": "#989898",
@@ -198,7 +200,7 @@ COLOR_MAP = {
 COLOR_PREFIXES = (
     "imu", "acc", "hr", "spo", "tmp", "temp", "bme",
     "vib", "led", "light", "audio", "amp", "knob", "hub",
-    "lora", "logger",
+    "lora", "logger", "motor",
 )
 
 # Category → sensor type shorthand (for WebSocket "sensor" field)
@@ -211,6 +213,7 @@ CAT_MAP = {
     "light_sensing":  "light",
     "audio_output":   "audio",
     "wireless_uplink": "logger",
+    "motor_output":   "motor",
 }
 
 clients: set = set()
@@ -283,6 +286,22 @@ last_transport_status: dict = {"type": "transport_status",
 # next $Q,ECA round-trip.
 last_eca_status:   dict | None = None
 last_eca_bytecode: dict | None = None
+
+
+def clear_hub_runtime_state() -> None:
+    """Discard identities and replay caches owned by a disconnected Hub."""
+    global last_eca_status, last_eca_bytecode
+    for cache in (
+        modules_by_uid, module_types_by_uid, msg_cache_by_uid,
+        stack_cache_by_uid, actuator_cache_by_uid,
+        uid_by_slot, slot_by_uid,
+        modules, module_types, msg_cache, stack_cache, actuator_cache,
+    ):
+        cache.clear()
+    pending_query_done_commands.clear()
+    topo_snapshot_uids.clear()
+    last_eca_status = None
+    last_eca_bytecode = None
 
 # ── ECA engine (used in --sim modes only) ──────────────────────
 # Per-module-type mapping from simulator data field name → ECA channel id.
@@ -1089,7 +1108,7 @@ async def ws_handler(ws):
                     print(f"[bridge] WS→serial: $L,CONFIG {target} "
                           f"(<{len(b64)} chars>, {len(subs)} subs)")
                 elif action == "sim_command":
-                    # Browser-side preset buttons (D1/D2/D3, clear, etc.)
+                    # Browser-side preset buttons (D1-D4, clear, etc.)
                     # in --sim modes only. Silently no-op when not in sim.
                     sim_cmd = str(inbound.get("command", "")).strip()
                     if sim_cmd_queue is not None and sim_cmd:
@@ -1318,6 +1337,7 @@ async def _drive_transport(transport: Transport):
             await transport.close()
         except Exception:
             pass
+        clear_hub_runtime_state()
         await _emit_transport_status(None, connected=False)
 
 
@@ -1667,6 +1687,39 @@ SIM_MODULE_DEFS = {
         },
         "hz": 0,
     },
+    "motor": {
+        # Slots 8-10 belong to the two remote modules and LoRa logger in the
+        # combined simulator. Slot 11 is the remaining ECA-addressable slot.
+        "id": "motorv1", "slot": 11, "face": 1, "color": "#D97757",
+        "descriptor": {
+            "id": "motorv1", "name": "Dual DC Motor", "cat": "motor_output",
+            "color": "#D97757", "ver": "1.0",
+            "caps": [
+                {"t": "actuator", "m": "dual_motor", "ax": 2,
+                 "rn": -255, "rx": 255, "res": 1, "dt": "int16[2]", "sr": []},
+            ],
+            "affs": ["independent_motor_control"],
+            "pwr": {"v": 5.0, "i": 100, "ip": 1000},
+            "phy": {"w": 8.0, "dim": [32, 32, 8], "plc": ["robot"]},
+        },
+        "hz": 0,
+    },
+    "motor_hub": {
+        "id": "motor_builtin", "slot": 0, "face": 0, "color": "#D97757",
+        "builtin": True,
+        "descriptor": {
+            "id": "motor_builtin", "name": "Built-in Dual Motor",
+            "cat": "motor_output", "color": "#D97757", "ver": "1.0",
+            "caps": [
+                {"t": "actuator", "m": "dual_motor", "ax": 2,
+                 "rn": -255, "rx": 255, "res": 1, "dt": "int16[2]", "sr": []},
+            ],
+            "affs": ["independent_motor_control", "built_in"],
+            "pwr": {"v": 5.0, "i": 100, "ip": 1000},
+            "phy": {"w": 0.0, "dim": [0, 0, 0], "plc": ["internal"]},
+        },
+        "hz": 0,
+    },
 }
 
 SIM_MODULE_DEFS["remote_temp"] = copy.deepcopy(SIM_MODULE_DEFS["temp"])
@@ -1747,6 +1800,8 @@ class SimModule:
         self.color = defn["color"]
         self.descriptor = defn["descriptor"]
         self.hz = defn["hz"]
+        self.is_builtin = bool(defn.get("builtin", False))
+        self.last_action_route: str | None = None
         self.active = True
         self.t0 = time.time()
         # Register uid ↔ slot both ways so the bridge's inbound-WS routing
@@ -1763,6 +1818,12 @@ class SimModule:
                     "_deadline_ms": 0}
         self.audio = {"frequency_hz": 0, "amplitude": 0, "mode": "off",
                       "until_ms": 0, "_deadline_ms": 0}
+        self.motors = {
+            1: {"mode": "stop", "speed": 0, "until_ms": 0,
+                "_deadline_ms": 0},
+            2: {"mode": "stop", "speed": 0, "until_ms": 0,
+                "_deadline_ms": 0},
+        }
         # One-shot sensor spike: {channel_id: (override_value, expires_ms)}.
         # Consumed by sim_sensor_data via _spike_override; auto-cleared.
         self.spikes: dict[int, tuple[float, int]] = {}
@@ -1983,6 +2044,7 @@ def dispatch_action(act: EcaAction) -> None:
     if mod is None:
         print(f"  [sim] ECA action for empty slot {target_slot} — ignored")
         return
+    mod.last_action_route = "local" if mod.is_builtin else "can"
     cmd = act.cmd
     now_ms = _sim_monotonic_ms()
     wall_ms = int(time.time() * 1000)
@@ -2051,6 +2113,27 @@ def dispatch_action(act: EcaAction) -> None:
         mod.audio = {"frequency_hz": 0, "amplitude": 0, "mode": "off",
                      "until_ms": 0, "_deadline_ms": 0}
 
+    # ── Dual DC motor command ───────────────────────
+    elif cmd == Act.MOTOR_SET:
+        motor = int(vget(0) + 0.5)
+        mode = int(vget(1) + 0.5)
+        speed = vbyte(2)
+        duration_ms = max(0, min(65535, int(vget(3) + 0.5)))
+        if motor not in (1, 2) or mode not in (0, 1, 2):
+            print(f"  [sim] invalid MOTOR_SET motor={motor} mode={mode} — ignored")
+            return
+        if mode == 0 or speed == 0:
+            mod.motors[motor] = {
+                "mode": "stop", "speed": 0, "until_ms": 0,
+                "_deadline_ms": 0,
+            }
+        else:
+            mod.motors[motor] = {
+                "mode": "forward" if mode == 1 else "reverse",
+                "speed": speed,
+                **deadlines(duration_ms),
+            }
+
     print(f"  [sim] ECA fired: target_uid={uid_hex} (slot={target_slot}) cmd={cmd}")
 
 
@@ -2063,6 +2146,29 @@ eca._on_action = dispatch_action
 def _sim_uid_to_slot(uid_u32: int) -> int:
     return slot_by_uid.get(f"{uid_u32:08X}", 0) or 0
 eca.set_uid_resolver(_sim_uid_to_slot)
+
+
+def expire_actuator_state(mod: SimModule, now_ms: int) -> None:
+    """Expire timed actuator channels without coupling independent outputs."""
+    led_deadline = mod.led.get("_deadline_ms", 0)
+    if led_deadline and now_ms >= led_deadline:
+        mod.led = {"r": 0, "g": 0, "b": 0, "brightness": 0,
+                   "mode": "off", "until_ms": 0, "_deadline_ms": 0}
+    vib_deadline = mod.vib.get("_deadline_ms", 0)
+    if vib_deadline and now_ms >= vib_deadline:
+        mod.vib = {"intensity": 0, "mode": "off", "until_ms": 0,
+                   "_deadline_ms": 0}
+    audio_deadline = mod.audio.get("_deadline_ms", 0)
+    if audio_deadline and now_ms >= audio_deadline:
+        mod.audio = {"frequency_hz": 0, "amplitude": 0, "mode": "off",
+                     "until_ms": 0, "_deadline_ms": 0}
+    for motor in (1, 2):
+        deadline = mod.motors[motor].get("_deadline_ms", 0)
+        if deadline and now_ms >= deadline:
+            mod.motors[motor] = {
+                "mode": "stop", "speed": 0, "until_ms": 0,
+                "_deadline_ms": 0,
+            }
 
 
 def _resolve_sim_target(token: str) -> int | None:
@@ -2135,6 +2241,12 @@ def _parse_sim_command(line: str) -> None:
                          "_deadline_ms": 0}
                 m.audio = {"frequency_hz": 0, "amplitude": 0, "mode": "off",
                            "until_ms": 0, "_deadline_ms": 0}
+                m.motors = {
+                    1: {"mode": "stop", "speed": 0, "until_ms": 0,
+                        "_deadline_ms": 0},
+                    2: {"mode": "stop", "speed": 0, "until_ms": 0,
+                        "_deadline_ms": 0},
+                }
             asyncio.create_task(_ack("cleared"))
             print("  [sim] ECA cleared")
         elif line.startswith("$A "):
@@ -2554,7 +2666,7 @@ def sim_print_help():
     print("  ╔══════════════════════════════════════════════╗")
     print("  ║  WearBlocks Simulator Commands               ║")
     print("  ╠══════════════════════════════════════════════╣")
-    print("  ║  +imu +hr +temp +led +vib +loralog         ║")
+    print("  ║  +imu +hr +temp +led +vib +motor +loralog  ║")
     print("  ║     Connect a module                         ║")
     print("  ║  -1  -2  -3  -4  -5                         ║")
     print("  ║     Disconnect module by slot number         ║")
@@ -2638,6 +2750,14 @@ async def sim_run_demo_d3():
     print("  [sim] D3: LED + audio + remote IMU - motion alert")
 
 
+async def sim_run_demo_d4():
+    """Demo preset 4: built-in dual motor with independent timed actions."""
+    await sim_clear_all()
+    await asyncio.sleep(0.2)
+    await sim_add_module("motor_hub")
+    print("  [sim] D4: built-in dual motor - independent M1/M2 test")
+
+
 async def sim_command_handler(cmd_queue: asyncio.Queue):
     """Process commands from the stdin queue."""
     while True:
@@ -2692,6 +2812,8 @@ async def sim_command_handler(cmd_queue: asyncio.Queue):
             await sim_run_demo_d2()
         elif cmd in ("demo3", "d3"):
             await sim_run_demo_d3()
+        elif cmd in ("demo4", "d4"):
+            await sim_run_demo_d4()
         elif cmd.lower().startswith("spike"):
             # spike <module_or_slot> <channel> <value> [duration_ms]
             tokens = cmd.split()
@@ -2769,22 +2891,17 @@ async def sim_data_loop():
 
         # 3. Auto-expire actuator state and broadcast diffs.
         for slot, mod in list(sim_modules.items()):
-            led_until = mod.led.get("_deadline_ms", 0)
-            if led_until and now_ms >= led_until:
-                mod.led = {"r": 0, "g": 0, "b": 0, "brightness": 0,
-                           "mode": "off", "until_ms": 0, "_deadline_ms": 0}
-            vib_until = mod.vib.get("_deadline_ms", 0)
-            if vib_until and now_ms >= vib_until:
-                mod.vib = {"intensity": 0, "mode": "off", "until_ms": 0,
-                           "_deadline_ms": 0}
-            audio_until = mod.audio.get("_deadline_ms", 0)
-            if audio_until and now_ms >= audio_until:
-                mod.audio = {"frequency_hz": 0, "amplitude": 0, "mode": "off",
-                             "until_ms": 0, "_deadline_ms": 0}
+            expire_actuator_state(mod, now_ms)
             snapshot = {
                 "led": {k: v for k, v in mod.led.items() if not k.startswith("_")},
                 "vib": {k: v for k, v in mod.vib.items() if not k.startswith("_")},
                 "audio": {k: v for k, v in mod.audio.items() if not k.startswith("_")},
+                "motors": {
+                    str(index): {
+                        k: v for k, v in state.items() if not k.startswith("_")
+                    }
+                    for index, state in mod.motors.items()
+                },
             }
             if last_broadcast.get(slot) != snapshot:
                 last_broadcast[slot] = snapshot
@@ -2792,7 +2909,8 @@ async def sim_data_loop():
                                  "uid": mod.uid, "slot": slot,
                                  "led": snapshot["led"],
                                  "vib": snapshot["vib"],
-                                 "audio": snapshot["audio"]})
+                                 "audio": snapshot["audio"],
+                                 "motors": snapshot["motors"]})
 
         # 4. Simulated LoRa base station ACKs queued logger batches.
         await _sim_logger_ack_tick(now_ms)
@@ -2811,6 +2929,7 @@ async def sim_loop(auto_demo: bool = False):
     print("  ║  Quick start:                                ��")
     print("  ║    demo     → 5 CAN + 2 remote Wi-Fi modules ║")
     print("  ║    +imu     → connect just an IMU            ║")
+    print("  ║    +motor   → connect the dual motor module  ║")
     print("  ║    stack hr on imu F4                        ║")
     print("  ║    help     → see all commands                ║")
     print("  ╚══════════════════════════════════════════════╝")

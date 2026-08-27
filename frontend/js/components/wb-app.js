@@ -7,6 +7,10 @@
 import { LitElement, html, css } from 'lit';
 import { wsClient } from '../ws-client.js';
 import { fieldNameForChannel, loadChannelCatalog } from '../module-channel-map.js';
+import {
+  hasHubPresence,
+  modulesAfterTransportStatus,
+} from '../hub-presence.js';
 import './wb-palette.js';
 import './wb-module-card.js';
 import './wb-sensor-panel.js';
@@ -48,7 +52,7 @@ export class WbApp extends LitElement {
     _panelHeight:    { type: Number,  state: true },
     _pendingDetach:  { type: Object,  state: true },  // Set<uid|slot>
     _children:       { type: Object,  state: true },  // Map<parentKey, Map<face, childKey>>
-    _actuatorByUid:  { type: Object,  state: true },  // Map<uid|slot, {led, vib}>
+    _actuatorByUid:  { type: Object,  state: true },  // Map<uid|slot, {led, vib, motors}>
     _debugOpen:      { type: Boolean, state: true },
     _workspaceRules: { type: Object,  state: true },  // current JSON rules from canvas
     _highlightedUid: { type: String,  state: true },  // uid to highlight in topology
@@ -230,6 +234,10 @@ export class WbApp extends LitElement {
 
     wsClient.onStatus((connected) => {
       this._connected = connected;
+      if (!connected) {
+        this._transport = { transport: null, label: null, connected: false };
+        this._clearHubRuntimeState({ connected: false });
+      }
     });
 
     wsClient.onMessage((msg) => this._handleMessage(msg));
@@ -250,6 +258,20 @@ export class WbApp extends LitElement {
       e.preventDefault();
       this._debugOpen = !this._debugOpen;
     }
+  }
+
+  _clearHubRuntimeState(transportStatus) {
+    this._modules = modulesAfterTransportStatus(this._modules, transportStatus);
+    this._sensorByUid = new Map();
+    this._actuatorByUid = new Map();
+    this._pendingDetach = new Set();
+    this._children = new Map();
+    this._slotToUid = new Map();
+    this._topoBuffer = [];
+    this._openPanels = [];
+    this._ecaStatus = null;
+    this._ecaRules = null;
+    this._lastEcaBytecodeB64 = '';
   }
 
   _handleMessage(msg) {
@@ -620,7 +642,12 @@ export class WbApp extends LitElement {
         const key = uid ?? msg.slot;
         if (key == null) break;
         const next = new Map(this._actuatorByUid);
-        next.set(key, { led: msg.led, vib: msg.vib, audio: msg.audio });
+        next.set(key, {
+          led: msg.led,
+          vib: msg.vib,
+          audio: msg.audio,
+          motors: msg.motors,
+        });
         this._actuatorByUid = next;
         break;
       }
@@ -740,6 +767,7 @@ export class WbApp extends LitElement {
           label:     msg.label,
           connected: !!msg.connected,
         };
+        if (!msg.connected) this._clearHubRuntimeState(msg);
         break;
       case 'paired_devices':
         // Forwarded to <wb-devices-panel> via wsClient.onMessage; nothing
@@ -1044,6 +1072,7 @@ export class WbApp extends LitElement {
       }
       visibleChildren = filtered;
     }
+    const hubPresent = hasHubPresence(this._transport, visibleModules);
     return html`
       <div class="main-row">
         <div class="sidebar-left"
@@ -1051,12 +1080,14 @@ export class WbApp extends LitElement {
              @open-config=${this._onOpenConfig}>
           <wb-palette
             .modules=${visibleModules}
-            .wifiInfo=${this._wifiInfo}>
+            .wifiInfo=${this._wifiInfo}
+            .hubPresent=${hubPresent}>
           </wb-palette>
         </div>
         <div class="center">
           <wb-block-canvas
             .modules=${visibleModules}
+            .hubPresent=${hubPresent}
             .hubProgramKnown=${this._ecaStatus != null}
             .hubHasProgram=${!!this._ecaStatus?.has_program}
             .pendingDetach=${this._pendingDetach}
@@ -1108,6 +1139,7 @@ export class WbApp extends LitElement {
         .sampleRate=${this._sampleRate}
         .frameCount=${this._frameCount}
         .transport=${this._transport}
+        .modules=${visibleModules}
         .eca=${this._ecaStatus}
         .oscActive=${this._oscActiveCount}
         @open-devices-panel=${() => this._devicesOpen = true}

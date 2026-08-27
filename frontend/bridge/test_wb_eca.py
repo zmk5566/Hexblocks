@@ -123,6 +123,7 @@ def _build_program(*, variables: list[float] | None = None,
 SENSOR_UID = 0xAA000001   # → slot 1
 LED_UID    = 0xAA000005   # → slot 5
 HR_UID     = 0xAA000002   # → slot 2
+MOTOR_UID  = 0xAA000006
 
 def _bind_default_resolver(eca):
     mapping = {SENSOR_UID: 1, LED_UID: 5, HR_UID: 2}
@@ -214,6 +215,27 @@ def test_simple_rule_fires_when_condition_met():
     assert fired[0].target == LED_UID
     assert fired[0].cmd == Act.LED_SOLID
     assert fired[0].vals == [255.0, 0.0, 0.0]
+
+
+def test_action_only_dual_motor_rule_fires_once_without_sensor():
+    m1 = _enc_action(target=MOTOR_UID, cmd=Act.MOTOR_SET,
+                     params=_const_params(1, 1, 160, 2000))
+    m2 = _enc_action(target=MOTOR_UID, cmd=Act.MOTOR_SET,
+                     params=_const_params(2, 2, 120, 3000))
+    prog = _build_program(rules=[(Logic.AND, [], [m1, m2])])
+
+    fired: list = []
+    eca = ECAEngine(on_action=lambda action: fired.append(action))
+    assert eca.load_program(prog)
+    eca.run_program()
+
+    eca.tick(now_ms=100)
+    eca.tick(now_ms=200)
+
+    assert [(action.target, action.cmd, action.vals) for action in fired] == [
+        (MOTOR_UID, Act.MOTOR_SET, [1.0, 1.0, 160.0, 2000.0]),
+        (MOTOR_UID, Act.MOTOR_SET, [2.0, 2.0, 120.0, 3000.0]),
+    ]
 
 
 def test_cooldown_suppresses_repeat_fire_until_condition_rearms():

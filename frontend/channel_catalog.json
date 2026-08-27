@@ -52,6 +52,7 @@
   "actuator_capabilities": {
     "led":       ["led", "rgb_light", "rgb"],
     "vibration": ["vib", "vibration", "haptic", "vibration_motor"],
-    "audio":     ["audio", "audio_synth", "audio_output", "tone_generator", "audio_feedback"]
+    "audio":     ["audio", "audio_synth", "audio_output", "tone_generator", "audio_feedback"],
+    "motor":     ["motor", "dual_motor", "motor_output", "dc_motor"]
   }
 }

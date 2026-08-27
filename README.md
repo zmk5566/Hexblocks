@@ -33,10 +33,11 @@ The core design goal is semantic continuity: physical modules, authoring referen
 ## Repo layout
 
 ```
-hardware/             ESP32-C3 firmware (hub + 6 module types) and PCB
+hardware/             ESP32-C3 firmware (hub + 7 module types) and PCB
   firmware/hub/       hub.ino, ModuleRegistry — CAN master, BLE/USB link,
                       Wi-Fi/OSC fallback host
-  firmware/module_*/  per-module sketches (imu, led, vibration,
+  firmware/motor_hub/ one-face BLE/USB hub with a built-in dual-motor actuator
+  firmware/module_*/  per-module sketches (imu, led, vibration, motor,
                       amplifier, light_resistor, resistor)
   firmware/lib/       shared C++ libraries: WearBlocksCAN, *Protocol,
                       *Descriptor, *Module, *ECA (bytecode interpreter),
@@ -107,6 +108,11 @@ The hub evaluates rules locally. A companion computer is only needed to author o
      -p /dev/cu.usbmodem* hardware/firmware/hub
    ```
 
+   For the standalone ESP32-C3FH4 + DRV8410 board, compile and upload
+   `hardware/firmware/motor_hub` instead. It exposes the same BLE/USB hub
+   protocol, uses GPIO5 as its single external Face 1, and advertises its
+   onboard M1/M2 pair as `Built-in Dual Motor` without consuming a CAN slot.
+
 2. **Flash each module.** Same flow, one sketch per module type. Example for the IMU module:
 
    ```bash
@@ -116,7 +122,7 @@ The hub evaluates rules locally. A companion computer is only needed to author o
      -p /dev/cu.usbmodem* hardware/firmware/module_imu
    ```
 
-   Repeat for `module_led`, `module_vibration`, `module_amplifier`, `module_light_resistor`, `module_resistor`.
+   Repeat for `module_led`, `module_vibration`, `module_motor`, `module_amplifier`, `module_light_resistor`, `module_resistor`.
 
 3. **Power up.** Snap modules onto the hub. The hub enumerates them over CAN, allocates slots, and (if a program is in NVS) starts evaluating immediately. No companion computer required.
 

@@ -166,6 +166,11 @@ enum WBActCmd : uint8_t {
     // Audio Synth (MAX98357A I2S amp)
     ACT_AUDIO_SET_TONE = 48,  // 2 params: frequency Hz, amplitude 0..255
     ACT_AUDIO_STOP     = 49,  // 0 params
+
+    // Dual DC motor (DRV8410)
+    // ECA params: motor (1/2), mode (0 stop, 1 forward, 2 reverse),
+    // speed (0..255), duration_ms (0 = continuous).
+    ACT_MOTOR_SET = 64,
 };
 
 // ─────────────────────────────────────────────────────
@@ -251,6 +256,13 @@ struct WBRule {
 // the new size still fits in the namespace's free pages.
 #define WB_ECA_PROGRAM_MAX 2048
 
+// Optional hub-local actuator dispatch. Returning true means the target and
+// command were consumed locally; false lets ECA fall back to normal CAN
+// module routing. Standard hubs leave this callback unset.
+typedef bool (*WBLocalActuatorCallback)(uint32_t targetUid, uint8_t cmd,
+                                        const uint8_t* payload,
+                                        uint8_t payloadLen);
+
 class WearBlocksECA {
 public:
     // Host-supplied UID→slot lookup. Returns 0 if uid is not registered.
@@ -268,6 +280,9 @@ public:
     void setUidResolver(UidToSlotFn fn) { _uidToSlot = fn; }
     void setActuatorDispatcher(ActuatorDispatchFn fn) { _actuatorDispatch = fn; }
     void setTopicDispatcher(TopicDispatchFn fn) { _topicDispatch = fn; }
+    void setLocalActuatorHandler(WBLocalActuatorCallback cb) {
+        _localActuator = cb;
+    }
 
     // Program management
     bool loadProgram(const uint8_t* data, uint16_t len);
@@ -366,6 +381,7 @@ private:
     UidToSlotFn _uidToSlot;
     ActuatorDispatchFn _actuatorDispatch;
     TopicDispatchFn _topicDispatch;
+    WBLocalActuatorCallback _localActuator;
 
     // Sensor cache: [slot 1-11][channel_id 0-47]
     float    _cache[WB_ECA_MAX_SLOTS][WB_CH_MAX];

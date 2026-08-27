@@ -70,6 +70,7 @@ const ACT_CMD_INFO = {
   [ACT.VAR_TOGGLE]:     { name: 'Var toggle',     params: [] },
   [ACT.AUDIO_SET_TONE]: { name: 'Audio tone',     params: ['freq_hz', 'amp'] },
   [ACT.AUDIO_STOP]:     { name: 'Audio stop',     params: [] },
+  [ACT.MOTOR_SET]:      { name: 'Motor set',      params: ['motor', 'mode', 'speed', 'duration_ms'] },
 };
 
 const COND_OP_SYM = {

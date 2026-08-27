@@ -10,6 +10,7 @@ export class WbPalette extends LitElement {
   static properties = {
     modules: { type: Array },
     wifiInfo: { type: Object },
+    hubPresent: { type: Boolean },
   };
 
   static styles = css`
@@ -148,6 +149,7 @@ export class WbPalette extends LitElement {
     super();
     this.modules = [];
     this.wifiInfo = {};
+    this.hubPresent = false;
   }
 
   _openHubInfo(e) {
@@ -175,18 +177,26 @@ export class WbPalette extends LitElement {
         <span class="title">Modules</span>
         <span class="badge">${count}</span>
       </div>
-      <div class="hub-row" title="Hub — runs the ECA engine and routes child modules">
-        <span class="hub-dot"></span>
-        <div class="hub-text">
-          <span class="hub-name">Hub</span>
-          <span class="hub-meta">ECA engine · ${count} module${count === 1 ? '' : 's'}</span>
-          <span class="hub-wifi" title=${wifiTitle}>${wifiMeta}</span>
+      ${this.hubPresent ? html`
+        <div class="hub-row" title="Hub — runs the ECA engine and routes child modules">
+          <span class="hub-dot"></span>
+          <div class="hub-text">
+            <span class="hub-name">Hub</span>
+            <span class="hub-meta">ECA engine · ${count} module${count === 1 ? '' : 's'}</span>
+            <span class="hub-wifi" title=${wifiTitle}>${wifiMeta}</span>
+          </div>
+          <button class="hub-info-btn"
+                  title="Open hub info and configuration"
+                  @click=${this._openHubInfo}>info</button>
         </div>
-        <button class="hub-info-btn"
-                title="Open hub info and configuration"
-                @click=${this._openHubInfo}>info</button>
-      </div>
-      ${count === 0
+      ` : ''}
+      ${!this.hubPresent
+        ? html`
+          <div class="empty-state">
+            <div class="dot"></div>
+            <p>Connect a hub to begin</p>
+          </div>`
+        : count === 0
         ? html`
           <div class="empty-state">
             <div class="dot"></div>

@@ -28,6 +28,7 @@ static bool wbEcaIsTransientChannel(uint8_t channelId) {
 WearBlocksECA::WearBlocksECA()
     : _uidToSlot(nullptr),
       _actuatorDispatch(nullptr), _topicDispatch(nullptr),
+      _localActuator(nullptr),
       _nextOwnerToken(0),
       _numVCs(0), _numRules(0), _running(false), _hasProgram(false),
       _rawLen(0), _proto(nullptr) {
@@ -584,6 +585,9 @@ void WearBlocksECA::releaseOutput(uint32_t uid, uint32_t token) {
 }
 
 bool WearBlocksECA::executeStop(uint32_t uid, uint8_t stopCmd) {
+    if (_localActuator && _localActuator(uid, stopCmd, nullptr, 0)) {
+        return true;
+    }
     uint8_t slot = _uidToSlot ? _uidToSlot(uid) : 0;
     if (slot == 0) return false;
     return dispatchActuator(slot, uid, stopCmd, nullptr, 0);
@@ -717,23 +721,16 @@ bool WearBlocksECA::executeAction(const WBAction& act) {
         return true;
     }
 
-    // Actuator commands: target is a module UID. Resolve to slot before
-    // emitting the CAN frame. If the UID isn't registered, skip silently.
-    uint8_t targetSlot = _uidToSlot ? _uidToSlot(act.target) : 0;
-    if (targetSlot == 0) {
-        Serial.printf("[ECA] ACT skip: uid=%08lX not registered\n",
-                      (unsigned long)act.target);
-        return false;
-    }
-
-    uint8_t buf[8];
+    // Build the payload once. A motor-hub can consume it locally before
+    // normal UID routing; otherwise these exact bytes use Wi-Fi/CAN dispatch.
+    uint8_t buf[8] = {};
+    uint8_t payloadLen = 0;
     uint8_t lease10ms = 0;
     if (act.mode == ACTION_STREAM) {
         uint32_t leaseMs = max((uint32_t)100, (uint32_t)act.update_interval_ms * 3U);
         leaseMs = min(leaseMs, (uint32_t)2550);
         lease10ms = (uint8_t)((leaseMs + 9) / 10);
     }
-    bool sent = false;
     switch ((WBActCmd)act.cmd) {
         case ACT_LED_SOLID: {
             buf[0] = clampByte(vals[0]);  // R
@@ -744,12 +741,12 @@ bool WearBlocksECA::executeAction(const WBAction& act) {
             buf[5] = (act.duration_ms >> 8) & 0xFF;
             buf[6] = act.duration_ms & 0xFF;
             buf[7] = lease10ms;
-            sent = dispatchActuator(targetSlot, act.target, act.cmd, buf, 8);
+            payloadLen = 8;
             break;
         }
         case ACT_LED_OFF:
         case ACT_LED_STOP:
-            sent = dispatchActuator(targetSlot, act.target, act.cmd, nullptr, 0);
+            payloadLen = 0;
             break;
 
         case ACT_VIBRATE: {
@@ -762,7 +759,7 @@ bool WearBlocksECA::executeAction(const WBAction& act) {
             buf[3] = (dur >> 8) & 0xFF;
             buf[4] = dur & 0xFF;
             buf[5] = lease10ms;
-            sent = dispatchActuator(targetSlot, act.target, act.cmd, buf, 6);
+            payloadLen = 6;
             break;
         }
         case ACT_VIBRATE_PULSE: {
@@ -771,7 +768,7 @@ bool WearBlocksECA::executeAction(const WBAction& act) {
             buf[2] = clampByte(fmaxf(1.0f, ceilf(vals[2] / 10.0f))); // off, 10 ms units
             buf[3] = clampByte(vals[3]);  // count
             buf[4] = lease10ms;
-            sent = dispatchActuator(targetSlot, act.target, act.cmd, buf, 5);
+            payloadLen = 5;
             break;
         }
         case ACT_VIBRATE_RAMP: {
@@ -785,11 +782,11 @@ bool WearBlocksECA::executeAction(const WBAction& act) {
             buf[4] = (dur >> 8) & 0xFF;
             buf[5] = dur & 0xFF;
             buf[6] = lease10ms;
-            sent = dispatchActuator(targetSlot, act.target, act.cmd, buf, 7);
+            payloadLen = 7;
             break;
         }
         case ACT_VIBRATE_STOP:
-            sent = dispatchActuator(targetSlot, act.target, act.cmd, nullptr, 0);
+            payloadLen = 0;
             break;
 
         case ACT_AUDIO_SET_TONE: {
@@ -802,12 +799,23 @@ bool WearBlocksECA::executeAction(const WBAction& act) {
             buf[5] = (act.duration_ms >> 8) & 0xFF;
             buf[6] = act.duration_ms & 0xFF;
             buf[7] = lease10ms;
-            sent = dispatchActuator(targetSlot, act.target, act.cmd, buf, 8);
+            payloadLen = 8;
             break;
         }
         case ACT_AUDIO_STOP:
-            sent = dispatchActuator(targetSlot, act.target, act.cmd, nullptr, 0);
+            payloadLen = 0;
             break;
+
+        case ACT_MOTOR_SET: {
+            uint16_t dur = clampU16(vals[3]);
+            buf[0] = clampByte(vals[0]);  // motor: 1 or 2
+            buf[1] = clampByte(vals[1]);  // mode: stop/forward/reverse
+            buf[2] = clampByte(vals[2]);  // PWM duty
+            buf[3] = (dur >> 8) & 0xFF;
+            buf[4] = dur & 0xFF;
+            payloadLen = 5;
+            break;
+        }
 
         // LED RAMP/BREATHE/BLINK/RAINBOW reserved — module_led v3 only
         // implements SOLID. Pass through resolved bytes for forward-compat.
@@ -815,10 +823,28 @@ bool WearBlocksECA::executeAction(const WBAction& act) {
             uint8_t n = act.numParams;
             if (n > sizeof(buf)) n = sizeof(buf);
             for (uint8_t i = 0; i < n; i++) buf[i] = clampByte(vals[i]);
-            sent = dispatchActuator(targetSlot, act.target, act.cmd, buf, n);
+            payloadLen = n;
             break;
         }
     }
+
+    const uint8_t* payload = payloadLen > 0 ? buf : nullptr;
+    if (_localActuator &&
+        _localActuator(act.target, act.cmd, payload, payloadLen)) {
+        Serial.printf("[ECA] ACT local cmd=%d (uid=%08lX)\n",
+                      act.cmd, (unsigned long)act.target);
+        return true;
+    }
+
+    // The target was not local. Resolve its UID before normal link routing.
+    uint8_t targetSlot = _uidToSlot ? _uidToSlot(act.target) : 0;
+    if (targetSlot == 0) {
+        Serial.printf("[ECA] ACT skip: uid=%08lX not registered\n",
+                      (unsigned long)act.target);
+        return false;
+    }
+    bool sent = dispatchActuator(targetSlot, act.target, act.cmd,
+                                 payload, payloadLen);
     if (sent) {
         Serial.printf("[ECA] ACT slot=%d cmd=%d (uid=%08lX)\n",
                       targetSlot, act.cmd, (unsigned long)act.target);

@@ -1,6 +1,6 @@
 /**
- * Pre-canned Blockly workspace JSON for the three simulator demos.
- * Used by the D1/D2/D3 buttons in <wb-status-bar>.
+ * Pre-canned Blockly workspace JSON for the simulator demos.
+ * Used by the D1-D4 buttons in <wb-status-bar>.
  *
  * Slot/channel identity uses the legacy slot-string path. The sim's
  * SIM_MODULE_DEFS pins each module type to a fixed slot:
@@ -11,6 +11,7 @@
  */
 
 import { CH } from './eca-encoder.js';
+import { moduleHasRole } from './module-channel-map.js';
 
 const LIGHT_SLOT = '6';
 const LED_SLOT   = '5';
@@ -160,8 +161,61 @@ export const DEMO_D3 = {
   },
 };
 
+/** D4: Dual Motor Test.
+ *  An action-only startup rule fires two independent actions once: M1 forward
+ *  for 2 seconds and M2 reverse for 3 seconds. The target is rebound to a
+ *  live motor UID by getDemoProgram() when the preset is loaded. */
+export const DEMO_D4 = {
+  blocks: {
+    languageVersion: 0,
+    blocks: [
+      {
+        type: 'eca_rule',
+        x: 20, y: 20,
+        fields: { LOGIC: 'AND' },
+        inputs: {
+          ACTIONS: { block: {
+            type: 'motor_action',
+            fields: {
+              SLOT: 'motor', MOTOR: '1', MODE: '1',
+              SPEED: 160, DURATION: 2000,
+            },
+            next: { block: {
+              type: 'motor_action',
+              fields: {
+                SLOT: 'motor', MOTOR: '2', MODE: '2',
+                SPEED: 120, DURATION: 3000,
+              },
+            }},
+          }},
+        },
+      },
+    ],
+  },
+};
+
 export const DEMO_PROGRAMS = {
   demo1: DEMO_D1,
   demo2: DEMO_D2,
   demo3: DEMO_D3,
+  demo4: DEMO_D4,
 };
+
+/** Return a fresh preset, binding D4 to the first active motor actuator. */
+export function getDemoProgram(name, modules = []) {
+  const template = DEMO_PROGRAMS[name];
+  if (!template) return null;
+  const state = JSON.parse(JSON.stringify(template));
+  if (name !== 'demo4') return state;
+
+  const motor = modules.find(mod =>
+    mod?.active !== false && mod?.uid && moduleHasRole(mod, 'motor'));
+  if (!motor) return state;
+
+  let action = state.blocks.blocks[0]?.inputs?.ACTIONS?.block;
+  while (action) {
+    if (action.type === 'motor_action') action.fields.SLOT = String(motor.uid);
+    action = action.next?.block;
+  }
+  return state;
+}
