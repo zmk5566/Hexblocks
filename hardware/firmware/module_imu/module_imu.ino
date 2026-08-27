@@ -19,6 +19,7 @@
 #include <WearBlocksProtocol.h>
 #include <WearBlocksDescriptor.h>
 #include <WearBlocksModule.h>
+#include <WearBlocksWireless.h>
 #include <WearBlocksECA.h>
 #include <Wire.h>
 #include <MPU6050_light.h>
@@ -48,6 +49,7 @@ WearBlocksCAN        can;
 WearBlocksProtocol   protocol;
 WearBlocksDescriptor descriptor;
 WBModule             module(can, protocol, descriptor);
+WBWirelessModule     wireless(module, protocol, descriptor);
 MPU6050              imu(Wire);
 
 static const char FW_VERSION[] = "3.0";
@@ -211,8 +213,7 @@ void setup() {
     }
     Serial.printf("[IMU] uid=%08lX\n", (unsigned long)module.uid());
 
-    // Topic callback is module-specific — register directly on protocol.
-    protocol.onTopic(onTopicChange);
+    wireless.onTopic(onTopicChange);
     module.onAfterAck(onRegistered);
 
 #if CHILD_DETECT
@@ -230,6 +231,7 @@ void setup() {
 #endif
 
     setupDescriptor();
+    wireless.begin();
     module.start();
     Serial.printf("[IMU] fwVersion=%s fwHash=%04X\n", FW_VERSION, module.fwHash());
 
@@ -243,6 +245,7 @@ void setup() {
 // ── Loop ──────────────────────────────────────────────────────
 void loop() {
     module.tick();
+    wireless.tick();
 
 #if CHILD_DETECT
     scanChildren();
@@ -250,7 +253,7 @@ void loop() {
 
     uint32_t now = millis();
 
-    if (module.registered() && now - lastSend >= SEND_INTERVAL) {
+    if (wireless.runtimeReady() && now - lastSend >= SEND_INTERVAL) {
         lastSend = now;
         imu.update();
 
@@ -261,40 +264,40 @@ void loop() {
         float gy = imu.getGyroY();
         float gz = imu.getGyroZ();
 
-        protocol.sendSensorChannel(WB_CH_AX, ax);
-        protocol.sendSensorChannel(WB_CH_AY, ay);
-        protocol.sendSensorChannel(WB_CH_AZ, az);
-        protocol.sendSensorChannel(WB_CH_GX, gx);
-        protocol.sendSensorChannel(WB_CH_GY, gy);
-        protocol.sendSensorChannel(WB_CH_GZ, gz);
+        wireless.sendSensorChannel(WB_CH_AX, ax);
+        wireless.sendSensorChannel(WB_CH_AY, ay);
+        wireless.sendSensorChannel(WB_CH_AZ, az);
+        wireless.sendSensorChannel(WB_CH_GX, gx);
+        wireless.sendSensorChannel(WB_CH_GY, gy);
+        wireless.sendSensorChannel(WB_CH_GZ, gz);
 
         float accMag = sqrtf(ax*ax + ay*ay + az*az);
 
         if (isTopicEnabled(WB_CH_ACC_MAG))
-            protocol.sendSensorChannel(WB_CH_ACC_MAG, accMag);
+            wireless.sendSensorChannel(WB_CH_ACC_MAG, accMag);
         if (isTopicEnabled(WB_CH_GYRO_MAG))
-            protocol.sendSensorChannel(WB_CH_GYRO_MAG, sqrtf(gx*gx + gy*gy + gz*gz));
+            wireless.sendSensorChannel(WB_CH_GYRO_MAG, sqrtf(gx*gx + gy*gy + gz*gz));
         if (isTopicEnabled(WB_CH_PITCH))
-            protocol.sendSensorChannel(WB_CH_PITCH, atan2f(ay, sqrtf(ax*ax + az*az)) * 180.0f / M_PI);
+            wireless.sendSensorChannel(WB_CH_PITCH, atan2f(ay, sqrtf(ax*ax + az*az)) * 180.0f / M_PI);
         if (isTopicEnabled(WB_CH_ROLL))
-            protocol.sendSensorChannel(WB_CH_ROLL, atan2f(ax, sqrtf(ay*ay + az*az)) * 180.0f / M_PI);
+            wireless.sendSensorChannel(WB_CH_ROLL, atan2f(ax, sqrtf(ay*ay + az*az)) * 180.0f / M_PI);
         if (isTopicEnabled(WB_CH_AX_LPF))
-            protocol.sendSensorChannel(WB_CH_AX_LPF, lpfUpdate(lpf_ax, ax));
+            wireless.sendSensorChannel(WB_CH_AX_LPF, lpfUpdate(lpf_ax, ax));
         if (isTopicEnabled(WB_CH_AY_LPF))
-            protocol.sendSensorChannel(WB_CH_AY_LPF, lpfUpdate(lpf_ay, ay));
+            wireless.sendSensorChannel(WB_CH_AY_LPF, lpfUpdate(lpf_ay, ay));
         if (isTopicEnabled(WB_CH_AZ_LPF))
-            protocol.sendSensorChannel(WB_CH_AZ_LPF, lpfUpdate(lpf_az, az));
+            wireless.sendSensorChannel(WB_CH_AZ_LPF, lpfUpdate(lpf_az, az));
         if (isTopicEnabled(WB_CH_ACC_MAG_LPF))
-            protocol.sendSensorChannel(WB_CH_ACC_MAG_LPF, lpfUpdate(lpf_acc_mag, accMag));
+            wireless.sendSensorChannel(WB_CH_ACC_MAG_LPF, lpfUpdate(lpf_acc_mag, accMag));
         if (isTopicEnabled(WB_CH_JERK)) {
             float jerk = fabsf(accMag - prevAccMag) * 50.0f;
-            protocol.sendSensorChannel(WB_CH_JERK, jerk);
+            wireless.sendSensorChannel(WB_CH_JERK, jerk);
         }
         prevAccMag = accMag;
 
         if (isTopicEnabled(WB_CH_SHAKE)) {
             if (accMag > SHAKE_THRESHOLD && (now - lastShakeTime) > SHAKE_COOLDOWN) {
-                protocol.sendSensorChannel(WB_CH_SHAKE, 1.0f);
+                wireless.sendSensorChannel(WB_CH_SHAKE, 1.0f);
                 lastShakeTime = now;
             }
         }
@@ -304,7 +307,7 @@ void loop() {
             if (aboveNow && !stepAboveZero && (now - lastStepTime) > STEP_MIN_INTERVAL) {
                 stepCount++;
                 lastStepTime = now;
-                protocol.sendSensorChannel(WB_CH_STEP, (float)stepCount);
+                wireless.sendSensorChannel(WB_CH_STEP, (float)stepCount);
             }
             stepAboveZero = aboveNow;
         }
@@ -313,7 +316,7 @@ void loop() {
             if (accMag < FREEFALL_THRESHOLD) {
                 if (!inFreefall) { freefallStart = now; inFreefall = true; }
                 else if ((now - freefallStart) > FREEFALL_DURATION) {
-                    protocol.sendSensorChannel(WB_CH_FREEFALL, 1.0f);
+                    wireless.sendSensorChannel(WB_CH_FREEFALL, 1.0f);
                     inFreefall = false;
                 }
             } else {

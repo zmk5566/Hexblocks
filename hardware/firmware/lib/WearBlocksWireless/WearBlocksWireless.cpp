@@ -303,6 +303,8 @@ WBWirelessModule::WBWirelessModule(WBModule& module,
       _lastHeartbeatMs(0),
       _msgSeq(1),
       _sensorSeq(1),
+      _lastActionMsgId(-1),
+      _lastTopicMsgId(-1),
       _begun(false),
       _wifiStarted(false),
       _udpStarted(false),
@@ -528,9 +530,17 @@ void WBWirelessModule::processOsc(const WBOscMessage& msg, IPAddress, uint16_t) 
             sendNack("bad_action", msgId);
             return;
         }
+        if (msgId == _lastActionMsgId) {
+            sendAck("action", msgId);
+            return;
+        }
         uint8_t n = msg.args[4].bLen;
-        if (paramLen >= 0 && paramLen < n) n = (uint8_t)paramLen;
+        if (paramLen < 0 || paramLen > 10 || paramLen != n) {
+            sendNack("bad_params", msgId);
+            return;
+        }
         if (_actuatorCb) _actuatorCb((uint8_t)cmd, msg.args[4].b, n);
+        _lastActionMsgId = msgId;
         sendAck("action", msgId);
         return;
     }
@@ -543,7 +553,12 @@ void WBWirelessModule::processOsc(const WBOscMessage& msg, IPAddress, uint16_t) 
             sendNack("bad_token", msgId);
             return;
         }
+        if (msgId == _lastTopicMsgId) {
+            sendAck("topic", msgId);
+            return;
+        }
         if (_topicCb) _topicCb((uint8_t)ch, enable != 0);
+        _lastTopicMsgId = msgId;
         sendAck("topic", msgId);
         return;
     }

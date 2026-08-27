@@ -21,6 +21,7 @@
 #include <WearBlocksProtocol.h>
 #include <WearBlocksDescriptor.h>
 #include <WearBlocksModule.h>
+#include <WearBlocksWireless.h>
 #include <WearBlocksECA.h>
 #define FASTLED_INTERNAL          // suppress pragma version banner
 #include <FastLED.h>
@@ -49,6 +50,7 @@ WearBlocksCAN        can;
 WearBlocksProtocol   protocol;
 WearBlocksDescriptor descriptor;
 WBModule             module(can, protocol, descriptor);
+WBWirelessModule     wireless(module, protocol, descriptor);
 CRGB                 leds[NUM_LEDS];
 
 static const char FW_VERSION[] = "4.0";
@@ -204,7 +206,7 @@ void setup() {
     }
     Serial.printf("[LED] uid=%08lX\n", (unsigned long)module.uid());
 
-    protocol.onActuatorCommand(onActuatorCmd);
+    wireless.onActuatorCommand(onActuatorCmd);
     module.onAfterAck(onRegistered);
 
 #if CHILD_DETECT
@@ -222,6 +224,7 @@ void setup() {
     FastLED.clear(true);
 
     setupDescriptor();
+    wireless.begin();
     module.start();
     Serial.printf("[LED] fwVersion=%s fwHash=%04X\n", FW_VERSION, module.fwHash());
 
@@ -231,6 +234,7 @@ void setup() {
 // ── Loop ──────────────────────────────────────────────────────
 void loop() {
     module.tick();
+    wireless.tick();
     if (ledTimed && (int32_t)(millis() - ledUntil) >= 0) {
         ledTimed = false;
         setAll(0, 0, 0);

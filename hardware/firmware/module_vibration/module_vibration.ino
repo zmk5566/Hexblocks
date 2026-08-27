@@ -19,6 +19,7 @@
 #include <WearBlocksProtocol.h>
 #include <WearBlocksDescriptor.h>
 #include <WearBlocksModule.h>
+#include <WearBlocksWireless.h>
 #include <WearBlocksECA.h>
 #include <Wire.h>
 #include <Adafruit_DRV2605.h>
@@ -49,6 +50,7 @@ WearBlocksCAN        can;
 WearBlocksProtocol   protocol;
 WearBlocksDescriptor descriptor;
 WBModule             module(can, protocol, descriptor);
+WBWirelessModule     wireless(module, protocol, descriptor);
 Adafruit_DRV2605     haptic;
 
 static const char FW_VERSION[] = "3.0";
@@ -286,7 +288,7 @@ void setup() {
         Serial.println("[VIB] CAN init FAILED!");
         while (1) delay(1000);
     }
-    protocol.onActuatorCommand(onActuatorCmd);
+    wireless.onActuatorCommand(onActuatorCmd);
     protocol.onActuatorConfig(onActuatorConfig);
     module.onAfterAck(onRegistered);
 
@@ -301,6 +303,7 @@ void setup() {
 #endif
 
     setupDescriptor();
+    wireless.begin();
     module.start();
 
     Wire.begin(I2C_SDA, I2C_SCL);
@@ -315,6 +318,7 @@ void setup() {
 
 void loop() {
     module.tick();
+    wireless.tick();
 #if CHILD_DETECT
     scanChildren();
 #endif

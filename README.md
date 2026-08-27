@@ -46,11 +46,12 @@ hardware/             ESP32-C3 firmware (hub + 7 module types) and PCB
 schematics/           KiCad project (board + schematic)
 openscad-model/       hex enclosure SCAD sources + exported STL
 frontend/
-  bridge/             Python bridge runtime: serial_bridge.py (WS + HTTP), wb_protocol.py,
-                      wb_eca.py, transport.py (USB-CDC + BLE)
+  bridge/             Python bridge runtime: serial_bridge.py (WS + HTTP),
+                      OSC forwarding + correlated control ingress,
+                      wb_protocol.py, wb_eca.py, transport.py (USB-CDC + BLE)
   js/                 ES modules: ws-client, eca-encoder/decoder,
                       llm-catalog, recommendation-plan, demo-programs
-  js/components/      Lit UI: wb-app, wb-block-canvas, wb-llm-panel,
+  js/components/      Lit UI: wb-app, wb-block-canvas, wb-sim-stage (Three.js), wb-llm-panel,
                       wb-sensor-panel, wb-eca-inspector, wb-status-bar,
                       wb-devices-panel, wb-debug-console
   tools/              frontend smoke/debug utilities
@@ -187,7 +188,12 @@ Same hardware setup as Mode A. The hub keeps any uploaded program running; the b
 
 4. **Optional: LLM authoring.** Set `DEEPSEEK_API_KEY` in `frontend/bridge/.env` so the bridge's `/api/chat` proxy can reach the model. The chat panel translates utterances into `<workspace_update>` envelopes that the canvas validates against the live module schema before letting you accept.
 
-5. **Optional: OSC forwarding.** Open the OSC panel from the status bar, add a loopback target, and use auto-populate to seed one address per live sensor channel. Non-loopback targets require launching the bridge with `--osc-allow-remote`.
+5. **Optional: bidirectional OSC.** Open the OSC panel from the status bar,
+   add a loopback forwarding target, and use auto-populate to seed one address
+   per live sensor channel. The bridge also listens on `127.0.0.1:7001` for
+   `/hex/control/<uid>/actuator` and replies with correlated
+   `ack`/`nack`/`state` messages. Non-loopback OSC in either direction requires
+   launching the bridge with `--osc-allow-remote`.
 
 ## Build Instructions
 

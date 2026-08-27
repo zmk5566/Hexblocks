@@ -134,6 +134,8 @@ private:
     uint32_t _lastHeartbeatMs;
     uint16_t _msgSeq;
     uint32_t _sensorSeq;
+    int32_t _lastActionMsgId;
+    int32_t _lastTopicMsgId;
     bool _begun;
     bool _wifiStarted;
     bool _udpStarted;

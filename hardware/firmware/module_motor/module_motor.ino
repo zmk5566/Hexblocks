@@ -20,6 +20,7 @@
 #include <WearBlocksProtocol.h>
 #include <WearBlocksDescriptor.h>
 #include <WearBlocksModule.h>
+#include <WearBlocksWireless.h>
 #include <WearBlocksECA.h>
 
 #if __has_include(<esp_arduino_version.h>)
@@ -63,6 +64,7 @@ WearBlocksCAN can;
 WearBlocksProtocol protocol;
 WearBlocksDescriptor descriptor;
 WBModule module(can, protocol, descriptor);
+WBWirelessModule wireless(module, protocol, descriptor);
 MotorState motors[2] = {{MOTOR_STOP, 0, 0}, {MOTOR_STOP, 0, 0}};
 
 static void writePwm(uint8_t pin, uint8_t channel, uint8_t duty) {
@@ -201,14 +203,16 @@ void setup() {
         Serial.println("[MOTOR] CAN init failed");
         while (true) delay(1000);
     }
-    protocol.onActuatorCommand(onActuatorCmd);
+    wireless.onActuatorCommand(onActuatorCmd);
     setupDescriptor();
+    wireless.begin();
     module.start();
     Serial.printf("[MOTOR] ready uid=%08lX\n", (unsigned long)module.uid());
 }
 
 void loop() {
     module.tick();
+    wireless.tick();
     tickMotors();
     protocol.sendHeartbeat();
     delay(1);

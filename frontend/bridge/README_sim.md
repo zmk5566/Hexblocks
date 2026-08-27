@@ -12,12 +12,13 @@ simulator.
 │ (wb-block-   │               │  (--sim modes)   │       │  engine    │
 │   canvas)    │◀── actuator ──│                  │◀──────│            │
 └──────────────┘    _state     └──────────────────┘       └────────────┘
+          OSC control :7001 ──────────▶│
+          ◀──── ack/nack/state ────────┘
                                       │
-                                SimModule.led/.vib state
+                         SimModule actuator state
                                       │
                                       ▼
-                               wb-sensor-panel.js
-                               (LED swatch, vib bar)
+                       sensor panel + Three.js twin
 ```
 
 The Python engine is a 1:1 port of
@@ -36,6 +37,11 @@ This auto-loads the 5-module demo (IMU + HR stacked on IMU F4 + Temp + LED + Vib
 and starts the WebSocket bridge on `:8765` plus HTTP on `:3000`.
 
 Open `http://localhost:3000` in the browser.
+
+Click **3D Twin** in the status bar to open the live Three.js view. It uses the
+same UID-keyed topology and sensor/actuator caches as the 2D canvas, so a
+physical Hub, the simulator, WebSocket controls, and OSC controls all update
+one model.
 
 ## Unit tests
 
@@ -236,3 +242,57 @@ oscdump should start printing one line per IMU sample.
 
 Limitations (v1): UDP only; per-channel messages only (no bundling);
 actuator messages emit the `cmd` code as their scalar arg.
+
+## OSC control return path
+
+The same bridge also listens for external actuator controls. By default it is
+loopback-only on `127.0.0.1:7001`; this is independent of forwarding targets.
+
+```text
+/hex/control/<uid>/actuator  request_id:string, cmd:int, semantic_params:int...
+```
+
+The preferred form always includes a caller-supplied `request_id`. The bridge
+validates the UID, command, parameter count, and value ranges, translates the
+semantic values to the current ECA-v4 module wire layout, and routes a
+correlated `$AO` command through the normal simulator/USB/BLE/Hub path. Legacy
+senders may omit the ID; the bridge assigns `legacy-N`.
+
+Replies are unicast to the UDP source port:
+
+```text
+/hex/control/<uid>/ack    request_id, stage, detail
+/hex/control/<uid>/nack   request_id, stage, reason
+/hex/control/<uid>/state  request_id, json_state
+```
+
+Every successful request progresses through `queued` and `routed`. The `$AS`
+reply carries the Hub's commanded state; for ordinary CAN modules it is marked
+unconfirmed because the current CAN action frame has no module-level ACK. A
+local motor or simulator can report `applied` immediately. A Wi-Fi module
+returns `/wb/ack`, so it also reports `applied`; the Wi-Fi Hub retries a missing
+ACK and reports timeout/NACK with the same external request ID.
+
+Supported semantic command arguments:
+
+| cmd | action | parameters |
+|---:|---|---|
+| `0`, `6` | LED off/stop | none |
+| `1` | LED solid | `r g b [duration_ms]` |
+| `16` | vibration | `intensity [duration_ms]` |
+| `17` | vibration pulse | `intensity on_ms off_ms count` |
+| `18` | vibration ramp | `from_pct to_pct [duration_ms]` |
+| `19` | vibration stop | none |
+| `48` | audio tone | `frequency_hz amplitude [duration_ms]` |
+| `49` | audio stop | none |
+| `64` | dual motor set | `motor(1/2) mode(0/1/2) speed duration_ms` |
+
+To change the listener:
+
+```bash
+python serial_bridge.py --sim-demo \
+  --osc-input-host 127.0.0.1 --osc-input-port 7001
+```
+
+Binding either OSC direction outside loopback requires the explicit
+`--osc-allow-remote` switch.

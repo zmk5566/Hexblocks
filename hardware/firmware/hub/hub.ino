@@ -393,6 +393,34 @@ static uint32_t g_wifiLastSensorSeq[WB_MAX_MODULES][WB_CH_MAX] = {};
 static uint32_t g_wifiProvisionCrc[WB_MAX_MODULES] = {};
 static uint32_t g_wifiProvisionAtMs[WB_MAX_MODULES] = {};
 static const uint32_t WB_CAN_LINK_STALE_MS = 3000;
+static const uint32_t WB_WIFI_COMMAND_RETRY_MS = 250;
+static const uint8_t WB_WIFI_COMMAND_MAX_ATTEMPTS = 3;
+// Keep enough room for a multi-channel topic burst while still using a
+// fixed-size table (no heap activity in the real-time loop).
+static const uint8_t WB_WIFI_PENDING_MAX = 16;
+
+enum WBWifiPendingKind : uint8_t {
+    WB_WIFI_PENDING_ACTION = 1,
+    WB_WIFI_PENDING_TOPIC = 2,
+};
+
+struct WBWifiPendingCommand {
+    bool active;
+    uint8_t kind;
+    uint8_t slot;
+    uint32_t uid;
+    uint16_t messageId;
+    uint8_t command;
+    uint8_t params[10];
+    uint8_t paramLen;
+    uint8_t channelId;
+    bool enable;
+    uint8_t attempts;
+    uint32_t lastSendMs;
+    char requestId[65];
+};
+
+static WBWifiPendingCommand g_wifiPending[WB_WIFI_PENDING_MAX] = {};
 #endif
 
 // ── uid → hex helper ──────────────────────────────────────────
@@ -1392,6 +1420,22 @@ static bool forwardLoggerRecord(uint32_t sourceUid, uint8_t channelId,
     return sent;
 }
 
+// Non-empty only while a request-ID-bearing $AO command is synchronously
+// traversing the dispatcher. ECA and legacy $A actions leave it empty.
+static char g_hostActuatorRequestId[65] = {0};
+
+static void emitActuatorState(uint32_t uid, uint8_t cmd,
+                              const uint8_t* params, uint8_t paramLen) {
+    if (paramLen > 10) paramLen = 10;
+    out.printf("$AS,%s,%u,%u,", uidHex(uid), (unsigned)cmd,
+               (unsigned)paramLen);
+    for (uint8_t i = 0; i < paramLen; i++) out.printf("%02X", params[i]);
+    if (g_hostActuatorRequestId[0]) {
+        out.printf(",%s", g_hostActuatorRequestId);
+    }
+    out.println();
+}
+
 bool handleEcaCommand(const char* cmd, size_t len);
 static bool dispatchActuatorForLink(uint8_t slot, uint32_t uid, uint8_t cmd,
                                     const uint8_t* params, uint8_t paramLen);
@@ -1639,6 +1683,57 @@ bool handleEcaCommand(const char* cmd, size_t len) {
         // Useful for "play once, don't auto-run on next boot."
         bool ok = eca.eraseFromNVS();
         out.printf("$OK PE %s\n", ok ? "erased" : "noop");
+        return true;
+    }
+
+    if (strncmp(cmd, "$AO ", 4) == 0) {
+        const char* p = cmd + 4;
+        while (*p == ' ') p++;
+        char requestId[65] = {0};
+        uint8_t ri = 0;
+        while (*p && *p != ' ' && ri < sizeof(requestId) - 1) {
+            requestId[ri++] = *p++;
+        }
+        while (*p == ' ') p++;
+        if (!requestId[0]) {
+            out.println("$ERR AO unknown missing_request_id");
+            return true;
+        }
+        uint8_t slot = resolveUidArg(p);
+        if (slot == 0xFF) {
+            out.printf("$ERR AO %s bad_uid\n", requestId);
+            return true;
+        }
+        while (*p && *p != ' ') p++;
+        while (*p == ' ') p++;
+        int parts[11];
+        int count = 0;
+        while (*p && count < 11) {
+            parts[count++] = atoi(p);
+            while (*p && *p != ' ') p++;
+            while (*p == ' ') p++;
+        }
+        if (count < 1) {
+            out.printf("$ERR AO %s missing_command\n", requestId);
+            return true;
+        }
+        uint8_t actionCmd = (uint8_t)parts[0];
+        uint8_t params[10] = {};
+        uint8_t paramCount = (uint8_t)(count - 1);
+        for (uint8_t i = 0; i < paramCount; i++) params[i] = (uint8_t)parts[i + 1];
+        const RegisteredModule* m = registry.getModule(slot);
+        uint32_t uid = m ? m->uid : 0;
+        strlcpy(g_hostActuatorRequestId, requestId,
+                sizeof(g_hostActuatorRequestId));
+        bool ok = dispatchActuatorForLink(slot, uid, actionCmd, params, paramCount);
+        g_hostActuatorRequestId[0] = '\0';
+        if (ok) {
+            out.printf("$OK AO %s uid=%s slot=%d cmd=%d route=sent\n",
+                       requestId, uidHex(uid), slot, actionCmd);
+        } else {
+            out.printf("$ERR AO %s uid=%s cmd=%d route=none\n",
+                       requestId, uidHex(uid), actionCmd);
+        }
         return true;
     }
 
@@ -2005,40 +2100,166 @@ static bool wifiSendDescriptorRequest(IPAddress ip, uint16_t port, uint32_t uid,
     return wifiSendOsc(ip, port, enc.data, enc.len);
 }
 
-static bool wifiSendActuator(uint8_t slot, uint32_t uid, uint8_t cmd,
-                             const uint8_t* params, uint8_t paramLen) {
-    const RegisteredModule* m = registry.getModule(slot);
-    if (!m || !moduleHasWifiEndpoint(m)) return false;
-    char uidBuf[9];
-    formatUidHex(uid, uidBuf, sizeof(uidBuf));
-    WBOscEncoder enc;
-    if (!wbOscStart(enc, g_wifiTxBuf, sizeof(g_wifiTxBuf), "/wb/action", "siiibs")) {
-        return false;
+static uint16_t wifiNextMessageId() {
+    uint16_t id = g_wifiMsgId++;
+    if (id == 0) id = g_wifiMsgId++;
+    return id;
+}
+
+static WBWifiPendingCommand* wifiAllocPending() {
+    for (uint8_t i = 0; i < WB_WIFI_PENDING_MAX; i++) {
+        if (!g_wifiPending[i].active) return &g_wifiPending[i];
     }
-    if (!wbOscAddString(enc, uidBuf)) return false;
-    if (!wbOscAddInt(enc, cmd)) return false;
-    if (!wbOscAddInt(enc, g_wifiMsgId++)) return false;
-    if (!wbOscAddInt(enc, paramLen)) return false;
-    if (!wbOscAddBlob(enc, params, paramLen)) return false;
-    if (!wbOscAddString(enc, g_wifiToken)) return false;
+    return nullptr;
+}
+
+static WBWifiPendingCommand* wifiFindPendingAction(uint8_t slot,
+                                                   uint32_t uid) {
+    // ECA STREAM updates have no host request ID.  Only the newest value is
+    // useful, so reuse the outstanding entry instead of filling the retry
+    // table faster than a module can ACK it.
+    if (g_hostActuatorRequestId[0]) return nullptr;
+    for (uint8_t i = 0; i < WB_WIFI_PENDING_MAX; i++) {
+        WBWifiPendingCommand& pending = g_wifiPending[i];
+        if (pending.active && pending.kind == WB_WIFI_PENDING_ACTION &&
+            pending.slot == slot && pending.uid == uid &&
+            !pending.requestId[0]) return &pending;
+    }
+    return nullptr;
+}
+
+static WBWifiPendingCommand* wifiFindPendingTopic(uint8_t slot, uint32_t uid,
+                                                  uint8_t channelId) {
+    // Topic configuration is desired state: a newer enable/disable supersedes
+    // an unacknowledged older value for the same channel.
+    for (uint8_t i = 0; i < WB_WIFI_PENDING_MAX; i++) {
+        WBWifiPendingCommand& pending = g_wifiPending[i];
+        if (pending.active && pending.kind == WB_WIFI_PENDING_TOPIC &&
+            pending.slot == slot && pending.uid == uid &&
+            pending.channelId == channelId) return &pending;
+    }
+    return nullptr;
+}
+
+static bool wifiTransmitPending(WBWifiPendingCommand& pending) {
+    const RegisteredModule* m = registry.getModule(pending.slot);
+    if (!m || m->uid != pending.uid || !moduleHasWifiEndpoint(m)) return false;
+    char uidBuf[9];
+    formatUidHex(pending.uid, uidBuf, sizeof(uidBuf));
+    WBOscEncoder enc;
+    if (pending.kind == WB_WIFI_PENDING_ACTION) {
+        if (!wbOscStart(enc, g_wifiTxBuf, sizeof(g_wifiTxBuf),
+                        "/wb/action", "siiibs")) return false;
+        if (!wbOscAddString(enc, uidBuf)) return false;
+        if (!wbOscAddInt(enc, pending.command)) return false;
+        if (!wbOscAddInt(enc, pending.messageId)) return false;
+        if (!wbOscAddInt(enc, pending.paramLen)) return false;
+        if (!wbOscAddBlob(enc, pending.params, pending.paramLen)) return false;
+        if (!wbOscAddString(enc, g_wifiToken)) return false;
+    } else {
+        if (!wbOscStart(enc, g_wifiTxBuf, sizeof(g_wifiTxBuf),
+                        "/wb/topic", "siiis")) return false;
+        if (!wbOscAddString(enc, uidBuf)) return false;
+        if (!wbOscAddInt(enc, pending.channelId)) return false;
+        if (!wbOscAddInt(enc, pending.enable ? 1 : 0)) return false;
+        if (!wbOscAddInt(enc, pending.messageId)) return false;
+        if (!wbOscAddString(enc, g_wifiToken)) return false;
+    }
     return wifiSendOsc(IPAddress(m->wifiIp), m->wifiPort, enc.data, enc.len);
 }
 
-static bool wifiSendTopic(uint8_t slot, uint32_t uid, uint8_t channelId, bool enable) {
-    const RegisteredModule* m = registry.getModule(slot);
-    if (!m || !moduleHasWifiEndpoint(m)) return false;
-    char uidBuf[9];
-    formatUidHex(uid, uidBuf, sizeof(uidBuf));
-    WBOscEncoder enc;
-    if (!wbOscStart(enc, g_wifiTxBuf, sizeof(g_wifiTxBuf), "/wb/topic", "siiis")) {
+static bool wifiSendActuator(uint8_t slot, uint32_t uid, uint8_t cmd,
+                             const uint8_t* params, uint8_t paramLen) {
+    if (paramLen > 10) return false;
+    WBWifiPendingCommand* pending = wifiFindPendingAction(slot, uid);
+    if (!pending) pending = wifiAllocPending();
+    if (!pending) return false;
+    memset(pending, 0, sizeof(*pending));
+    pending->active = true;
+    pending->kind = WB_WIFI_PENDING_ACTION;
+    pending->slot = slot;
+    pending->uid = uid;
+    pending->messageId = wifiNextMessageId();
+    pending->command = cmd;
+    pending->paramLen = paramLen;
+    if (paramLen > 0 && params) memcpy(pending->params, params, paramLen);
+    strlcpy(pending->requestId, g_hostActuatorRequestId,
+            sizeof(pending->requestId));
+    if (!wifiTransmitPending(*pending)) {
+        pending->active = false;
         return false;
     }
-    if (!wbOscAddString(enc, uidBuf)) return false;
-    if (!wbOscAddInt(enc, channelId)) return false;
-    if (!wbOscAddInt(enc, enable ? 1 : 0)) return false;
-    if (!wbOscAddInt(enc, g_wifiMsgId++)) return false;
-    if (!wbOscAddString(enc, g_wifiToken)) return false;
-    return wifiSendOsc(IPAddress(m->wifiIp), m->wifiPort, enc.data, enc.len);
+    pending->attempts = 1;
+    pending->lastSendMs = millis();
+    return true;
+}
+
+static bool wifiSendTopic(uint8_t slot, uint32_t uid, uint8_t channelId, bool enable) {
+    WBWifiPendingCommand* pending = wifiFindPendingTopic(slot, uid, channelId);
+    if (!pending) pending = wifiAllocPending();
+    if (!pending) return false;
+    memset(pending, 0, sizeof(*pending));
+    pending->active = true;
+    pending->kind = WB_WIFI_PENDING_TOPIC;
+    pending->slot = slot;
+    pending->uid = uid;
+    pending->messageId = wifiNextMessageId();
+    pending->channelId = channelId;
+    pending->enable = enable;
+    if (!wifiTransmitPending(*pending)) {
+        pending->active = false;
+        return false;
+    }
+    pending->attempts = 1;
+    pending->lastSendMs = millis();
+    return true;
+}
+
+static void wifiEmitCommandResult(const char* tag,
+                                  const WBWifiPendingCommand& pending,
+                                  const char* detail) {
+    out.printf("$%s,%s,%u,%s", tag, uidHex(pending.uid),
+               (unsigned)pending.messageId, detail ? detail : "");
+    if (pending.requestId[0]) out.printf(",%s", pending.requestId);
+    out.println();
+}
+
+static void handleWirelessCommandResult(const WBOscMessage& msg,
+                                        IPAddress ip, uint16_t port,
+                                        bool ack) {
+    const char* uidText = oscStringArg(msg, 0);
+    int32_t messageId = oscIntArg(msg, 1, -1);
+    const char* detail = oscStringArg(msg, 2);
+    uint32_t uid;
+    if (messageId < 0 || !parseUidHex(uidText, uid)) return;
+    for (uint8_t i = 0; i < WB_WIFI_PENDING_MAX; i++) {
+        WBWifiPendingCommand& pending = g_wifiPending[i];
+        if (!pending.active || pending.uid != uid ||
+            pending.messageId != (uint16_t)messageId) continue;
+        const RegisteredModule* m = registry.getModule(pending.slot);
+        if (!m || m->wifiIp != (uint32_t)ip || m->wifiPort != port) return;
+        wifiEmitCommandResult(ack ? "WA" : "WN", pending,
+                              detail && detail[0] ? detail :
+                              (ack ? "ok" : "module_nack"));
+        pending.active = false;
+        return;
+    }
+}
+
+static void processWifiCommandRetries(uint32_t now) {
+    for (uint8_t i = 0; i < WB_WIFI_PENDING_MAX; i++) {
+        WBWifiPendingCommand& pending = g_wifiPending[i];
+        if (!pending.active ||
+            now - pending.lastSendMs < WB_WIFI_COMMAND_RETRY_MS) continue;
+        if (pending.attempts >= WB_WIFI_COMMAND_MAX_ATTEMPTS) {
+            wifiEmitCommandResult("WN", pending, "timeout");
+            pending.active = false;
+            continue;
+        }
+        wifiTransmitPending(pending);
+        pending.attempts++;
+        pending.lastSendMs = now;
+    }
 }
 
 static bool dispatchActuatorForLink(uint8_t slot, uint32_t uid, uint8_t cmd,
@@ -2054,6 +2275,7 @@ static bool dispatchActuatorForLink(uint8_t slot, uint32_t uid, uint8_t cmd,
         sent = wifiSendActuator(slot, uid, cmd, params, paramLen) || sent;
     }
     if (sent) {
+        emitActuatorState(uid, cmd, params, paramLen);
         forwardLoggerRecord(uid, cmd, WB_LOGGER_RECORD_ECA_EVENT, 0, 1.0f);
     }
     return sent;
@@ -2231,6 +2453,10 @@ static void processWifiOscMessage(const WBOscMessage& msg, IPAddress ip, uint16_
         handleWirelessSensor(msg, ip, port);
     } else if (strcmp(msg.address, "/wb/descriptor/blob") == 0) {
         handleWirelessDescriptorBlob(msg, ip, port);
+    } else if (strcmp(msg.address, "/wb/ack") == 0) {
+        handleWirelessCommandResult(msg, ip, port, true);
+    } else if (strcmp(msg.address, "/wb/nack") == 0) {
+        handleWirelessCommandResult(msg, ip, port, false);
     }
 }
 
@@ -2275,6 +2501,8 @@ static bool dispatchActuatorForLink(uint8_t slot, uint32_t, uint8_t cmd,
                                     const uint8_t* params, uint8_t paramLen) {
     if (slot == 0 || slot >= WB_MAX_MODULES) return false;
     protocol.sendActuatorCommand(slot, cmd, params, paramLen);
+    const RegisteredModule* m = registry.getModule(slot);
+    if (m) emitActuatorState(m->uid, cmd, params, paramLen);
     return true;
 }
 
@@ -2389,6 +2617,9 @@ void loop() {
     eca.tick();
 
     uint32_t now = millis();
+#if WB_HUB_ENABLE_WIFI_OSC
+    processWifiCommandRetries(now);
+#endif
 
     // Round-robin one face per tick (6 faces in 120 ms).
     if (now - lastFaceScan >= FACE_SCAN_TICK) {

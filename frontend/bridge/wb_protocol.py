@@ -19,6 +19,9 @@ Wire grammar (v2):
   $c,<parentUid>,<childUid|PENDING>,<parentFace>
   $T,<uid>,<parentLabel>,<parentFace>
   $W,<uid>,<activeLink>,<transportMode>,<topologyState>,<ip>,<port>
+  $AS,<uid>,<cmd>,<paramLen>,<paramsHex>[,<requestId>]
+  $WA,<uid>,<msgId>,<kind>[,<requestId>]
+  $WN,<uid>,<msgId>,<reason>[,<requestId>]
   $L,<uid>,<queueDepth>,<dropped>,<lastAckMs>,<rssi>,<snr>,<timeQuality>,<configRev>
   $Q,DONE
   $OK <text>     (space-separated, not comma)
@@ -267,6 +270,52 @@ def parse_line(raw: str) -> dict | None:
             return {"type": "wifi_pass", "password": parts[2]}
         return None
 
+    if tag == "AS":
+        # Commanded actuator state emitted by the Hub after routing.
+        # $AS,<uid>,<cmd>,<paramLen>,<paramsHex>[,<requestId>]
+        parts = line[1:].split(",", 5)
+        if len(parts) < 5:
+            return None
+        try:
+            command = int(parts[2])
+            param_len = int(parts[3])
+            params = bytes.fromhex(parts[4]) if parts[4] else b""
+        except (ValueError, TypeError):
+            return None
+        if param_len < 0 or param_len > 10 or len(params) != param_len:
+            return None
+        result = {
+            "type": "actuator_state",
+            "uid": parts[1],
+            "cmd": command,
+            "params": list(params),
+            "source": "hub_command",
+            "confirmed": False,
+        }
+        if len(parts) >= 6 and parts[5]:
+            result["request_id"] = parts[5]
+        return result
+
+    if tag in ("WA", "WN"):
+        # Module-side ACK/NACK for a Hub→module Wi-Fi OSC command.
+        parts = line[1:].split(",", 4)
+        if len(parts) < 4:
+            return None
+        try:
+            message_id = int(parts[2])
+        except ValueError:
+            return None
+        result = {
+            "type": "wireless_command_result",
+            "uid": parts[1],
+            "message_id": message_id,
+            "status": "ack" if tag == "WA" else "nack",
+            "detail": parts[3],
+        }
+        if len(parts) >= 5 and parts[4]:
+            result["request_id"] = parts[4]
+        return result
+
     if tag == "Q":
         parts = line[1:].split(",", 1)
         if len(parts) >= 2 and parts[1] == "DONE":
@@ -380,6 +429,22 @@ def _selftest() -> None:
     pw = parse_line("$WIFI,PASS,hex-ABCDEF0123456789")
     assert pw == {"type": "wifi_pass", "password": "hex-ABCDEF0123456789"}, pw
     assert parse_line("$WIFI,DISABLED") == {"type": "wifi_disabled"}
+    actuator = parse_line("$AS,FACE0005,1,8,FF28050000000000")
+    assert actuator == {
+        "type": "actuator_state", "uid": "FACE0005", "cmd": 1,
+        "params": [255, 40, 5, 0, 0, 0, 0, 0],
+        "source": "hub_command", "confirmed": False,
+    }, actuator
+    assert parse_line("$WA,FACE0005,17,action") == {
+        "type": "wireless_command_result", "uid": "FACE0005",
+        "message_id": 17, "status": "ack", "detail": "action",
+    }
+    assert parse_line("$WN,FACE0005,18,timeout") == {
+        "type": "wireless_command_result", "uid": "FACE0005",
+        "message_id": 18, "status": "nack", "detail": "timeout",
+    }
+    assert parse_line("$AS,FACE0005,0,0,,osc-7")["request_id"] == "osc-7"
+    assert parse_line("$WA,FACE0005,19,action,osc-7")["request_id"] == "osc-7"
 
     e = parse_line("$E,1,1,3,2,128,1")
     assert (e["type"] == "eca_status" and e["running"] and e["has_program"]

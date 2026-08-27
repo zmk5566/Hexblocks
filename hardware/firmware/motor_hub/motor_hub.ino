@@ -129,6 +129,9 @@ private:
 };
 
 MirrorStream out;
+static char g_hostActuatorRequestId[65] = {0};
+static void emitActuatorState(uint32_t uid, uint8_t cmd,
+                              const uint8_t* params, uint8_t paramLen);
 
 // ── Pin assignment ─────────────────────────────────────────────
 #define CAN_TX_PIN   7
@@ -236,6 +239,7 @@ static bool handleLocalActuator(uint32_t targetUid, uint8_t cmd,
     if (!payload || payloadLen < 5) return true;
     const uint16_t durationMs = ((uint16_t)payload[3] << 8) | payload[4];
     setMotor(payload[0], payload[1], payload[2], durationMs);
+    emitActuatorState(targetUid, cmd, payload, payloadLen);
     return true;
 }
 
@@ -517,6 +521,16 @@ static const char* uidHex(uint32_t uid) {
     static char buf[9];
     formatUidHex(uid, buf, sizeof(buf));
     return buf;
+}
+
+static void emitActuatorState(uint32_t uid, uint8_t cmd,
+                              const uint8_t* params, uint8_t paramLen) {
+    if (paramLen > 10) paramLen = 10;
+    out.printf("$AS,%s,%u,%u,", uidHex(uid), (unsigned)cmd,
+               (unsigned)paramLen);
+    for (uint8_t i = 0; i < paramLen; i++) out.printf("%02X", params[i]);
+    if (g_hostActuatorRequestId[0]) out.printf(",%s", g_hostActuatorRequestId);
+    out.println();
 }
 
 // Parse 8-char hex uid from a C string (space-terminated or NUL).
@@ -1304,6 +1318,69 @@ bool handleEcaCommand(const char* cmd, size_t len) {
         return true;
     }
 
+    if (strncmp(cmd, "$AO ", 4) == 0) {
+        const char* p = cmd + 4;
+        while (*p == ' ') p++;
+        char requestId[65] = {0};
+        uint8_t ri = 0;
+        while (*p && *p != ' ' && ri < sizeof(requestId) - 1) {
+            requestId[ri++] = *p++;
+        }
+        while (*p == ' ') p++;
+        if (!requestId[0]) {
+            out.println("$ERR AO unknown missing_request_id");
+            return true;
+        }
+        uint32_t targetUid = 0;
+        if (!parseUidHex(p, targetUid)) {
+            out.printf("$ERR AO %s bad_uid\n", requestId);
+            return true;
+        }
+        const bool localTarget = targetUid == builtinMotorUid;
+        uint8_t slot = localTarget ? 0xFF : registry.findByUid(targetUid);
+        if (!localTarget && slot == 0xFF) {
+            out.printf("$ERR AO %s bad_uid\n", requestId);
+            return true;
+        }
+        while (*p && *p != ' ') p++;
+        while (*p == ' ') p++;
+        int parts[11];
+        int count = 0;
+        while (*p && count < 11) {
+            parts[count++] = atoi(p);
+            while (*p && *p != ' ') p++;
+            while (*p == ' ') p++;
+        }
+        if (count < 1) {
+            out.printf("$ERR AO %s missing_command\n", requestId);
+            return true;
+        }
+        uint8_t actionCmd = (uint8_t)parts[0];
+        uint8_t params[10] = {};
+        uint8_t paramCount = (uint8_t)(count - 1);
+        for (uint8_t i = 0; i < paramCount; i++) params[i] = (uint8_t)parts[i + 1];
+        strlcpy(g_hostActuatorRequestId, requestId,
+                sizeof(g_hostActuatorRequestId));
+        bool ok = false;
+        if (localTarget) {
+            ok = handleLocalActuator(targetUid, actionCmd, params, paramCount);
+        } else {
+            protocol.sendActuatorCommand(slot, actionCmd, params, paramCount);
+            emitActuatorState(targetUid, actionCmd, params, paramCount);
+            ok = true;
+        }
+        g_hostActuatorRequestId[0] = '\0';
+        if (ok) {
+            out.printf("$OK AO %s uid=%s cmd=%d route=%s\n",
+                       requestId, uidHex(targetUid), actionCmd,
+                       localTarget ? "local" : "can");
+        } else {
+            out.printf("$ERR AO %s uid=%s cmd=%d route=none\n",
+                       requestId, uidHex(targetUid), actionCmd);
+        }
+        return true;
+    }
+
     if (strncmp(cmd, "$A ", 3) == 0) {
         const char* p = cmd + 3;
         while (*p == ' ') p++;
@@ -1343,6 +1420,8 @@ bool handleEcaCommand(const char* cmd, size_t len) {
             } else {
                 protocol.sendActuatorCommand(slot, c, params,
                                              (uint8_t)paramCount);
+                emitActuatorState(targetUid, c, params,
+                                  (uint8_t)paramCount);
                 out.printf("$OK A slot=%d cmd=%d\n", slot, c);
             }
         }

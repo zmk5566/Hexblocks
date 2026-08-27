@@ -36,6 +36,7 @@ from transport import (
 from osc_forwarder import (
     OscForwarder, schema_to_default_mappings, load_channel_catalog,
 )
+from osc_ingress import OscIngress, ControlRequest
 
 WS_PORT, HTTP_PORT, BAUD = 8765, 3000, 115200
 
@@ -270,6 +271,15 @@ actuator_cache: dict = {}
 
 serial_write_queue: asyncio.Queue = asyncio.Queue()
 
+# Request-ID-bearing OSC controls waiting for a Hub/simulator result. The
+# actual UDP socket lives in ``osc_ingress``; keeping lifecycle state here lets
+# normal parsed bridge events close the loop without coupling wb_protocol.py to
+# networking.
+osc_ingress: OscIngress | None = None
+osc_control_pending: dict[str, dict] = {}
+OSC_CONTROL_ROUTE_TIMEOUT_S = 3.0
+OSC_CONTROL_RETENTION_S = 10.0
+
 # ── Active transport (USB or BLE — mutually exclusive) ─────────
 # Set by serial_loop / ble_loop. The transport_supervisor coroutine
 # watches `transport_request` for switch commands from WS clients.
@@ -302,6 +312,11 @@ def clear_hub_runtime_state() -> None:
     topo_snapshot_uids.clear()
     last_eca_status = None
     last_eca_bytecode = None
+    for request_id in list(osc_control_pending):
+        if osc_ingress is not None:
+            osc_ingress.result(request_id, ok=False, stage="transport",
+                               detail="Hub transport disconnected")
+        _finish_osc_control(request_id)
 
 # ── ECA engine (used in --sim modes only) ──────────────────────
 # Per-module-type mapping from simulator data field name → ECA channel id.
@@ -330,6 +345,114 @@ eca = ECAEngine()
 # from broadcast(); see osc_forwarder.py for queue + drop-oldest design.
 # `allow_remote` is patched in main() from the CLI flag before start().
 osc_forwarder = OscForwarder()
+
+
+async def _enqueue_osc_control(request: ControlRequest) -> None:
+    osc_control_pending[request.request_id] = {
+        "request": request,
+        "queued_at": time.monotonic(),
+        "routed_at": None,
+        "state_seen": False,
+    }
+    await serial_write_queue.put(request.serial_line)
+    print(f"[bridge] OSC→serial: $AO {request.request_id} "
+          f"{request.uid} {request.cmd} (<{len(request.wire_params)} bytes>)")
+
+
+def create_osc_ingress(
+    host: str = "127.0.0.1",
+    port: int = 7001,
+    *,
+    allow_remote: bool = False,
+) -> OscIngress:
+    """Create the OSC control listener on the shared command queue seam."""
+    return OscIngress(
+        host=host,
+        port=port,
+        allow_remote=allow_remote,
+        known_uids=lambda: modules_by_uid.keys(),
+        enqueue=_enqueue_osc_control,
+        on_error=lambda message: print(f"[osc-in] rejected: {message}"),
+    )
+
+
+def _finish_osc_control(request_id: str) -> None:
+    osc_control_pending.pop(request_id, None)
+    if osc_ingress is not None:
+        osc_ingress.forget(request_id)
+
+
+def _handle_osc_bridge_event(msg: dict) -> None:
+    """Translate normal bridge events into unicast OSC control replies."""
+    if osc_ingress is None:
+        return
+    mtype = msg.get("type")
+
+    if mtype == "command_ack":
+        # Hub/sim replies: "$OK AO <request_id> ..." / "$ERR AO ...".
+        match = re.match(r"^AO\s+([A-Za-z0-9_.:-]{1,64})(?:\s|$)",
+                         str(msg.get("text", "")))
+        if not match:
+            return
+        request_id = match.group(1)
+        pending = osc_control_pending.get(request_id)
+        if pending is None:
+            return
+        ok = msg.get("status") == "ok"
+        osc_ingress.result(
+            request_id, ok=ok, stage="routed" if ok else "route",
+            detail=str(msg.get("text", "")))
+        if ok:
+            pending["routed_at"] = time.monotonic()
+            if pending.get("state_seen") and "route=local" in str(msg.get("text", "")):
+                osc_ingress.result(request_id, ok=True, stage="applied",
+                                   detail="local actuator executed")
+                _finish_osc_control(request_id)
+        else:
+            _finish_osc_control(request_id)
+        return
+
+    if mtype == "actuator_state":
+        request_id = str(msg.get("request_id") or "")
+        if not request_id or request_id not in osc_control_pending:
+            return
+        pending = osc_control_pending[request_id]
+        pending["state_seen"] = True
+        osc_ingress.state(request_id, msg)
+        if msg.get("confirmed"):
+            osc_ingress.result(request_id, ok=True, stage="applied",
+                               detail="actuator state confirmed")
+            _finish_osc_control(request_id)
+        return
+
+    if mtype == "wireless_command_result":
+        request_id = str(msg.get("request_id") or "")
+        if not request_id or request_id not in osc_control_pending:
+            return
+        ok = msg.get("status") == "ack"
+        osc_ingress.result(
+            request_id, ok=ok, stage="applied" if ok else "module",
+            detail=str(msg.get("detail", "")))
+        _finish_osc_control(request_id)
+
+
+async def _osc_control_timeout_loop() -> None:
+    while True:
+        await asyncio.sleep(0.25)
+        now = time.monotonic()
+        for request_id, pending in list(osc_control_pending.items()):
+            routed_at = pending.get("routed_at")
+            if routed_at is None:
+                if now - pending["queued_at"] >= OSC_CONTROL_ROUTE_TIMEOUT_S:
+                    if osc_ingress is not None:
+                        osc_ingress.result(request_id, ok=False, stage="route",
+                                           detail="Hub response timeout")
+                    _finish_osc_control(request_id)
+            elif now - routed_at >= OSC_CONTROL_RETENTION_S:
+                # CAN currently has no module-level action ACK. A routed ACK
+                # plus commanded state is the strongest honest result there;
+                # retain briefly for late state, then release bookkeeping.
+                _finish_osc_control(request_id)
 
 
 def _is_hex_color(value) -> bool:
@@ -602,6 +725,113 @@ def _prune_uid_caches_to(live_uids: set[str]) -> None:
         print(f"[bridge] TOPO pruned stale cache: {sorted(dead_uids)}")
 
 
+def _wire_u32_be(params: list[int], offset: int) -> int:
+    if len(params) < offset + 4:
+        return 0
+    return ((params[offset] << 24) | (params[offset + 1] << 16)
+            | (params[offset + 2] << 8) | params[offset + 3])
+
+
+def _decode_wire_actuator_state(msg: dict) -> dict:
+    """Project a Hub $AS command echo into the UI's rich actuator shape."""
+    uid = msg["uid"]
+    command = int(msg.get("cmd", 0))
+    params = [int(value) & 0xFF for value in msg.get("params", [])]
+    previous = actuator_cache_by_uid.get(uid, {})
+    now_ms = int(time.time() * 1000)
+    state = {
+        **previous,
+        **msg,
+        "uid": uid,
+        "slot": slot_by_uid.get(uid),
+        "cmd": command,
+        "params": params,
+        "ts": now_ms,
+        "led": copy.deepcopy(previous.get("led", {
+            "r": 0, "g": 0, "b": 0, "brightness": 0,
+            "mode": "off", "until_ms": 0,
+        })),
+        "vib": copy.deepcopy(previous.get("vib", {
+            "intensity": 0, "mode": "off", "until_ms": 0,
+        })),
+        "audio": copy.deepcopy(previous.get("audio", {
+            "frequency_hz": 0, "amplitude": 0, "mode": "off",
+            "until_ms": 0,
+        })),
+        "motors": copy.deepcopy(previous.get("motors", {
+            "1": {"mode": "stop", "speed": 0, "until_ms": 0},
+            "2": {"mode": "stop", "speed": 0, "until_ms": 0},
+        })),
+    }
+
+    if command in (Act.LED_OFF, Act.LED_STOP):
+        state["led"] = {"r": 0, "g": 0, "b": 0, "brightness": 0,
+                        "mode": "off", "until_ms": 0}
+    elif command in (Act.LED_SOLID, Act.LED_RAMP, Act.LED_BREATHE,
+                     Act.LED_BLINK, Act.LED_RAINBOW):
+        duration = _wire_u32_be(params, 3)
+        state["led"] = {
+            "r": params[0] if len(params) > 0 else 0,
+            "g": params[1] if len(params) > 1 else 0,
+            "b": params[2] if len(params) > 2 else 0,
+            "brightness": 255,
+            "mode": "solid" if command == Act.LED_SOLID else "effect",
+            "until_ms": now_ms + duration if duration else 0,
+        }
+    elif command == Act.VIBRATE:
+        duration = _wire_u32_be(params, 1)
+        state["vib"] = {
+            "intensity": params[0] if params else 0,
+            "mode": "on",
+            "until_ms": now_ms + duration if duration else 0,
+        }
+    elif command == Act.VIBRATE_PULSE:
+        on_ms = (params[1] if len(params) > 1 else 10) * 10
+        off_ms = (params[2] if len(params) > 2 else 10) * 10
+        count = params[3] if len(params) > 3 else 1
+        duration = (on_ms + off_ms) * max(1, count)
+        state["vib"] = {
+            "intensity": params[0] if params else 0,
+            "mode": "pulse", "on_ms": on_ms, "off_ms": off_ms,
+            "count": count, "until_ms": now_ms + duration,
+        }
+    elif command == Act.VIBRATE_RAMP:
+        duration = _wire_u32_be(params, 2)
+        state["vib"] = {
+            "intensity": params[1] if len(params) > 1 else 0,
+            "from": params[0] if params else 0,
+            "mode": "ramp",
+            "until_ms": now_ms + duration if duration else 0,
+        }
+    elif command == Act.VIBRATE_STOP:
+        state["vib"] = {"intensity": 0, "mode": "off", "until_ms": 0}
+    elif command == Act.AUDIO_SET_TONE:
+        frequency = (params[0] if params else 0) \
+            | ((params[1] if len(params) > 1 else 0) << 8)
+        duration = _wire_u32_be(params, 3)
+        state["audio"] = {
+            "frequency_hz": frequency,
+            "amplitude": params[2] if len(params) > 2 else 0,
+            "mode": "tone",
+            "until_ms": now_ms + duration if duration else 0,
+        }
+    elif command == Act.AUDIO_STOP:
+        state["audio"] = {"frequency_hz": 0, "amplitude": 0,
+                          "mode": "off", "until_ms": 0}
+    elif command == Act.MOTOR_SET and len(params) >= 5:
+        motor = params[0]
+        mode = params[1]
+        duration = (params[3] << 8) | params[4]
+        if motor in (1, 2):
+            state["motors"][str(motor)] = {
+                "mode": ("stop" if mode == 0 or params[2] == 0 else
+                         "forward" if mode == 1 else "reverse"),
+                "speed": params[2],
+                "until_ms": now_ms + duration if duration else 0,
+            }
+    return state
+
+
 def parse_line(raw: str):
     """Parse a $-prefixed hub line into the bridge's JSON-shaped event.
 
@@ -722,6 +952,15 @@ def parse_line(raw: str):
             cached["topology_state"] = msg.get("topology_state")
         return msg
 
+    if mtype == "actuator_state":
+        uid = msg["uid"]
+        msg["slot"] = slot_by_uid.get(uid)
+        return _decode_wire_actuator_state(msg)
+
+    if mtype == "wireless_command_result":
+        msg["slot"] = slot_by_uid.get(msg["uid"])
+        return msg
+
     if mtype == "logger_status":
         uid = msg["uid"]
         msg["slot"] = slot_by_uid.get(uid)
@@ -811,6 +1050,7 @@ def cache_msg(msg: dict):
 
 
 async def broadcast(msg: dict):
+    _handle_osc_bridge_event(msg)
     if msg["type"] in ("hello", "descriptor", "module_info", "link_state", "child_stack",
                        "child_unstack", "actuator_state", "logger_status",
                        "logger_config"):
@@ -831,7 +1071,7 @@ async def broadcast(msg: dict):
     recorder.event(msg)
     payload = json.dumps(msg)
     dead = set()
-    for ws in clients:
+    for ws in tuple(clients):
         try:
             await ws.send(payload)
         except websockets.exceptions.ConnectionClosed:
@@ -1802,6 +2042,8 @@ class SimModule:
         self.hz = defn["hz"]
         self.is_builtin = bool(defn.get("builtin", False))
         self.last_action_route: str | None = None
+        self.last_action_cmd: int | None = None
+        self.last_action_params: list[float] = []
         self.active = True
         self.t0 = time.time()
         # Register uid ↔ slot both ways so the bridge's inbound-WS routing
@@ -2046,6 +2288,8 @@ def dispatch_action(act: EcaAction) -> None:
         return
     mod.last_action_route = "local" if mod.is_builtin else "can"
     cmd = act.cmd
+    mod.last_action_cmd = int(cmd)
+    mod.last_action_params = [float(value) for value in (act.vals or [])]
     now_ms = _sim_monotonic_ms()
     wall_ms = int(time.time() * 1000)
     vals = act.vals or []
@@ -2190,6 +2434,72 @@ def _resolve_sim_target(token: str) -> int | None:
     return _slot_for_type(token.lower())
 
 
+def _sim_action_from_wire(target_uid: int, command: int,
+                          raw: list[int]) -> EcaAction:
+    """Decode the Hub's v4 actuator payload bytes into simulator semantics."""
+    values: list[float] = []
+    duration_ms = 0
+    if command in (Act.LED_SOLID, Act.LED_RAMP, Act.LED_BREATHE,
+                   Act.LED_BLINK, Act.LED_RAINBOW):
+        values = [float(value) for value in raw[:3]]
+        duration_ms = _wire_u32_be(raw, 3)
+    elif command == Act.VIBRATE:
+        values = [float(raw[0] if raw else 0)]
+        duration_ms = _wire_u32_be(raw, 1)
+    elif command == Act.VIBRATE_PULSE:
+        values = [
+            float(raw[0] if len(raw) > 0 else 0),
+            float((raw[1] if len(raw) > 1 else 10) * 10),
+            float((raw[2] if len(raw) > 2 else 10) * 10),
+            float(raw[3] if len(raw) > 3 else 1),
+        ]
+    elif command == Act.VIBRATE_RAMP:
+        values = [float(raw[0] if raw else 0),
+                  float(raw[1] if len(raw) > 1 else 0)]
+        duration_ms = _wire_u32_be(raw, 2)
+    elif command == Act.AUDIO_SET_TONE:
+        frequency = (raw[0] if raw else 0) \
+            | ((raw[1] if len(raw) > 1 else 0) << 8)
+        values = [float(frequency), float(raw[2] if len(raw) > 2 else 0)]
+        duration_ms = _wire_u32_be(raw, 3)
+    elif command == Act.MOTOR_SET:
+        values = [
+            float(raw[0] if len(raw) > 0 else 0),
+            float(raw[1] if len(raw) > 1 else 0),
+            float(raw[2] if len(raw) > 2 else 0),
+            float(((raw[3] << 8) | raw[4]) if len(raw) > 4 else 0),
+        ]
+
+    from wb_eca import ActionParam, REF as _REF
+    params_typed = [ActionParam(type=_REF.CONST, id=0, ch=0, value=value)
+                    for value in values]
+    return EcaAction(target=target_uid, cmd=command,
+                     duration_ms=duration_ms,
+                     params=params_typed, vals=values)
+
+
+def _sim_actuator_message(mod: SimModule, slot: int, command: int,
+                          raw: list[int], request_id: str = "") -> dict:
+    return {
+        "type": "actuator_state",
+        "uid": mod.uid,
+        "slot": slot,
+        "cmd": command,
+        "params": list(raw),
+        "request_id": request_id or None,
+        "source": "simulator",
+        "confirmed": True,
+        "led": {k: v for k, v in mod.led.items() if not k.startswith("_")},
+        "vib": {k: v for k, v in mod.vib.items() if not k.startswith("_")},
+        "audio": {k: v for k, v in mod.audio.items() if not k.startswith("_")},
+        "motors": {
+            str(index): {k: v for k, v in state.items()
+                         if not k.startswith("_")}
+            for index, state in mod.motors.items()
+        },
+    }
+
+
 def _parse_sim_command(line: str) -> None:
     """Route a $-prefixed serial line synchronously into the ECA engine.
     Called from sim_command_consumer; safe to also call from anywhere that
@@ -2249,35 +2559,35 @@ def _parse_sim_command(line: str) -> None:
                 }
             asyncio.create_task(_ack("cleared"))
             print("  [sim] ECA cleared")
-        elif line.startswith("$A "):
+        elif line.startswith(("$AO ", "$A ")):
             # $A <uid|slot> <cmd> <p0..p9>   — v2 hub addresses by UID; we
             # still accept a numeric slot for legacy host commands until the
             # frontend migration lands.
-            parts = line[3:].split()
+            is_osc = line.startswith("$AO ")
+            parts = line[4 if is_osc else 3:].split()
+            request_id = parts.pop(0) if is_osc and parts else ""
             if len(parts) < 2:
-                asyncio.create_task(_ack("$A: need target + cmd", ok=False))
+                prefix = f"AO {request_id}" if is_osc else "$A"
+                asyncio.create_task(_ack(f"{prefix}: need target + cmd", ok=False))
                 return
             target = parts[0]
             slot = _resolve_sim_target(target)
             if slot is None:
-                asyncio.create_task(_ack(f"$A bad_target {target}", ok=False))
+                prefix = f"AO {request_id}" if is_osc else "$A"
+                asyncio.create_task(_ack(f"{prefix} bad_target {target}", ok=False))
                 return
             cmd = int(parts[1])
-            # $A's free-form params are positional bytes — wrap each as a
-            # CONST-typed action param so the float-resolving dispatch path
-            # gives the same byte values as the legacy raw-bytes path.
-            # v4 actions take a u32 target (uid). _resolve_sim_target() above
-            # already gave us the sim slot; we look up its uid here.
-            from wb_eca import ActionParam, REF as _REF
             mod = sim_modules.get(slot)
             target_uid = int(mod.uid, 16) if (mod and mod.uid) else 0
-            raw = [int(p) for p in parts[2:]][:4]  # cap at WB_ACTION_MAX_PARAMS
-            params_typed = [ActionParam(type=_REF.CONST, id=0, ch=0,
-                                        value=float(b)) for b in raw]
-            dispatch_action(EcaAction(target=target_uid, cmd=cmd,
-                                      params=params_typed,
-                                      vals=[float(b) for b in raw]))
-            asyncio.create_task(_ack(f"A slot={slot} cmd={cmd}"))
+            raw = [max(0, min(255, int(p))) for p in parts[2:]][:10]
+            dispatch_action(_sim_action_from_wire(target_uid, cmd, raw))
+            if is_osc:
+                asyncio.create_task(_ack(
+                    f"AO {request_id} uid={mod.uid} slot={slot} cmd={cmd} route=sim"))
+                asyncio.create_task(broadcast(
+                    _sim_actuator_message(mod, slot, cmd, raw, request_id)))
+            else:
+                asyncio.create_task(_ack(f"A slot={slot} cmd={cmd}"))
         elif line.startswith(("$TE", "$TD", "$TA")):
             # $TE/$TD <uid|slot> <ch>   /   $TA <uid|slot>
             # Sim has no CAN to forward to; resolve-and-ack so the frontend
@@ -2907,6 +3217,10 @@ async def sim_data_loop():
                 last_broadcast[slot] = snapshot
                 await broadcast({"type": "actuator_state",
                                  "uid": mod.uid, "slot": slot,
+                                 "cmd": mod.last_action_cmd,
+                                 "params": mod.last_action_params,
+                                 "source": "simulator",
+                                 "confirmed": True,
                                  "led": snapshot["led"],
                                  "vib": snapshot["vib"],
                                  "audio": snapshot["audio"],
@@ -3104,10 +3418,13 @@ async def main():
                          "post-mortem debugging (timestamped, line-flushed).")
     ap.add_argument("--osc-allow-remote", dest="osc_allow_remote",
                     action="store_true",
-                    help="Allow OSC forwarding to non-loopback hosts. "
-                         "Default policy is loopback-only because the bridge "
-                         "WS listens on 0.0.0.0; without this flag the "
-                         "forwarder cannot be turned into a UDP reflector.")
+                    help="Allow OSC forwarding targets and control senders "
+                         "outside loopback. Default keeps both directions "
+                         "local to this machine.")
+    ap.add_argument("--osc-input-host", default="127.0.0.1",
+                    help="OSC actuator ingress bind host (default: 127.0.0.1).")
+    ap.add_argument("--osc-input-port", type=int, default=7001,
+                    help="OSC actuator ingress UDP port (default: 7001).")
     args = ap.parse_args()
     if args.selftest:
         _parse_line_selftest()
@@ -3134,19 +3451,43 @@ async def main():
         if osc_forwarder.allow_remote:
             print("[bridge] OSC: --osc-allow-remote set; non-loopback targets allowed")
         await osc_forwarder.start()
-        asyncio.create_task(_osc_stats_loop())
-        if args.sim or args.sim_demo:
-            await sim_loop(auto_demo=args.sim_demo)
-        elif args.mock:
-            await mock_loop()
-        elif args.ble:
-            # Seed the request queue so the supervisor connects immediately.
-            await transport_request.put(("ble", args.ble, args.ble))
-            await transport_supervisor(initial_port=None)
-        elif args.idle:
-            await transport_supervisor(initial_port=None)
-        else:
-            await serial_loop(args.port)
+        global osc_ingress
+        osc_ingress = create_osc_ingress(
+            args.osc_input_host,
+            args.osc_input_port,
+            allow_remote=bool(args.osc_allow_remote),
+        )
+        stats_task = None
+        timeout_task = None
+        try:
+            await osc_ingress.start()
+            print(f"[bridge] OSC actuator ingress on "
+                  f"udp://{args.osc_input_host}:{osc_ingress.port}")
+            stats_task = asyncio.create_task(_osc_stats_loop())
+            timeout_task = asyncio.create_task(_osc_control_timeout_loop())
+            if args.sim or args.sim_demo:
+                await sim_loop(auto_demo=args.sim_demo)
+            elif args.mock:
+                await mock_loop()
+            elif args.ble:
+                # Seed the request queue so the supervisor connects immediately.
+                await transport_request.put(("ble", args.ble, args.ble))
+                await transport_supervisor(initial_port=None)
+            elif args.idle:
+                await transport_supervisor(initial_port=None)
+            else:
+                await serial_loop(args.port)
+        finally:
+            for task in (stats_task, timeout_task):
+                if task is not None:
+                    task.cancel()
+            for request_id in list(osc_control_pending):
+                osc_ingress.result(request_id, ok=False, stage="bridge",
+                                   detail="bridge stopped")
+                _finish_osc_control(request_id)
+            await osc_ingress.stop()
+            osc_ingress = None
+            await osc_forwarder.stop()
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -32,12 +32,58 @@ def reset_sim_globals():
         serial_bridge.logger_config_by_uid,
         serial_bridge.sim_logger_profiles,
         serial_bridge.sim_logger_status,
+        serial_bridge.osc_control_pending,
     ]
     for mapping in maps:
         mapping.clear()
     yield
     for mapping in maps:
         mapping.clear()
+
+
+def test_wire_actuator_state_decodes_request_and_dual_motor_state(monkeypatch):
+    monkeypatch.setattr(serial_bridge.time, "time", lambda: 20.0)
+    serial_bridge.slot_by_uid["FACE0005"] = 5
+
+    parsed = serial_bridge.parse_line("$AS,FACE0005,64,5,0202C805DC,osc-9")
+    state = serial_bridge._decode_wire_actuator_state(parsed)
+
+    assert state["request_id"] == "osc-9"
+    assert state["slot"] == 5
+    assert state["motors"]["2"] == {
+        "mode": "reverse", "speed": 200, "until_ms": 21_500,
+    }
+
+
+def test_local_motor_route_reports_applied_after_state(monkeypatch):
+    class StubIngress:
+        def __init__(self):
+            self.results = []
+            self.forgotten = []
+
+        def result(self, request_id, **result):
+            self.results.append((request_id, result))
+            return True
+
+        def forget(self, request_id):
+            self.forgotten.append(request_id)
+
+    ingress = StubIngress()
+    monkeypatch.setattr(serial_bridge, "osc_ingress", ingress)
+    serial_bridge.osc_control_pending["motor-local"] = {
+        "queued_at": 0.0, "routed_at": None, "state_seen": True,
+    }
+
+    serial_bridge._handle_osc_bridge_event({
+        "type": "command_ack", "status": "ok",
+        "text": "AO motor-local uid=FACE0000 cmd=64 route=local",
+    })
+
+    assert [result[1]["stage"] for result in ingress.results] == [
+        "routed", "applied",
+    ]
+    assert ingress.forgotten == ["motor-local"]
+    assert "motor-local" not in serial_bridge.osc_control_pending
 
 
 def test_demo_d4_clears_topology_then_attaches_builtin_motor(monkeypatch):

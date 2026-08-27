@@ -1,7 +1,7 @@
 # Wi-Fi / OSC Fallback Runtime
 
-Status: first end-to-end implementation for simple sensor modules
-(`module_resistor` and `module_light_resistor`).
+Status: end-to-end sensor, actuator, topic, ACK/retry, and duplicate-suppression
+runtime for the explicit `wifi_hub` variant.
 
 This runtime belongs to the explicit `hardware/firmware/wifi_hub` build. The
 default `hardware/firmware/hub` build shares the same CAN/BLE/USB/ECA core but
@@ -94,13 +94,13 @@ Module to hub:
 /wb/module/heartbeat   s i s s     uid, seq, linkState, token
 /wb/sensor             s i f i s   uid, channel, value, seq, token
 /wb/descriptor/blob    s i i b s   uid, fwHash, seq, serializedDescriptor, token
+/wb/ack                s i s       uid, msgId, status
+/wb/nack               s i s       uid, msgId, reason
 ```
 
 Hub to module:
 
 ```text
-/wb/ack                s i s       uid, msgId, status
-/wb/nack               s i s       uid, msgId, reason
 /wb/descriptor/request s i i s     uid, fwHash, msgId, token
 /wb/action             s i i i b s uid, cmd, msgId, paramLen, params, token
 /wb/topic              s i i i s   uid, channel, enable, msgId, token
@@ -110,13 +110,37 @@ Broadcast is intentionally reserved for discovery and low-frequency status.
 Runtime sensor and actuator/control messages should be unicast between a module
 and the hub.
 
+For actions and topic changes, the Hub keeps a fixed pending table and retries
+after 250 ms, up to three sends. Modules remember the most recent action and
+topic message IDs: a retry is ACKed again but its callback is not executed a
+second time. ECA `STREAM` action updates and repeated desired topic state are
+coalesced while an ACK is outstanding, preventing a slow Wi-Fi link from
+turning into an unbounded queue.
+
+The companion-visible correlated wire lines are:
+
+```text
+$AO <requestId> <uid> <cmd> [wire params...]       host control request
+$AS,<uid>,<cmd>,<paramLen>,<hex>[,<requestId>]     routed state echo
+$WA,<uid>,<msgId>,<detail>[,<requestId>]           module ACK
+$WN,<uid>,<msgId>,<reason>[,<requestId>]           module NACK/timeout
+```
+
+The standard wired Hub understands `$AO` and emits `$AS` too, but never starts
+Wi-Fi. This keeps `hub` deterministic while `wifi_hub` owns the wireless
+fallback policy.
+
+## Module coverage
+
+- `module_resistor`, `module_light_resistor`, and `module_imu` route sensor
+  samples through `WBWirelessModule`.
+- `module_led`, `module_vibration`, `module_amplifier`, and `module_motor`
+  receive Wi-Fi actuator commands through the same wrapper.
+- CAN remains active according to each module's transport policy; the wrapper
+  does not fork the application-level actuator implementation.
+
 ## Current limitations
 
-- `module_resistor` and `module_light_resistor` use `WBWirelessModule` for
-  CAN/Wi-Fi sensor routing. IMU, LED, vibration, and audio sketches still need
-  to be moved onto the wrapper for Wi-Fi topic/action handling.
-- Hub action/topic packets are ACKed by the module, but hub-side retry and
-  dedup bookkeeping are still minimal.
 - Descriptor transfer is implemented as a single OSC blob. If descriptor or
   config payloads grow beyond one safe UDP datagram, promote this to chunked
   `seq/index/total/crc` transfer.

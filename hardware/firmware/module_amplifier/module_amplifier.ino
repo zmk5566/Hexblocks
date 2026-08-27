@@ -21,6 +21,7 @@
 #include <WearBlocksProtocol.h>
 #include <WearBlocksDescriptor.h>
 #include <WearBlocksModule.h>
+#include <WearBlocksWireless.h>
 #include <WearBlocksECA.h>
 #include <AudioTools.h>
 
@@ -52,6 +53,7 @@ WearBlocksCAN        can;
 WearBlocksProtocol   protocol;
 WearBlocksDescriptor descriptor;
 WBModule             module(can, protocol, descriptor);
+WBWirelessModule     wireless(module, protocol, descriptor);
 
 static const char FW_VERSION[] = "2.0";
 
@@ -223,7 +225,7 @@ void setup() {
     }
     Serial.printf("[AMP] uid=%08lX\n", (unsigned long)module.uid());
 
-    protocol.onActuatorCommand(onActuatorCmd);
+    wireless.onActuatorCommand(onActuatorCmd);
     module.onAfterAck(onRegistered);
 
 #if CHILD_DETECT
@@ -246,6 +248,7 @@ void setup() {
     src.begin(info);
 
     setupDescriptor();
+    wireless.begin();
     module.start();
     Serial.printf("[AMP] fwVersion=%s fwHash=%04X\n", FW_VERSION, module.fwHash());
 
@@ -255,6 +258,7 @@ void setup() {
 // ── Loop ──────────────────────────────────────────────────────
 void loop() {
     module.tick();
+    wireless.tick();
     if (g_toneTimed && (int32_t)(millis() - g_toneUntil) >= 0) stopTone();
     copier.copy();
 #if CHILD_DETECT

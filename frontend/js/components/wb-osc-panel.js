@@ -213,6 +213,18 @@ export class WbOscPanel extends LitElement {
       align-items: center;
       gap: 8px;
     }
+    .ingress {
+      border: 1px solid var(--wb-border);
+      background: var(--wb-bg);
+      padding: 8px 10px;
+      color: var(--wb-text-dim);
+      font-size: 0.78rem;
+      line-height: 1.55;
+    }
+    .ingress code {
+      color: var(--wb-text);
+      font-family: var(--wb-font-mono, monospace);
+    }
   `;
 
   constructor() {
@@ -332,6 +344,13 @@ export class WbOscPanel extends LitElement {
           </button>
         </header>
         <div class="body">
+          <div class="ingress">
+            <b>Control return path</b> — listen on <code>127.0.0.1:7001</code>.
+            Send <code>/hex/control/&lt;uid&gt;/actuator</code> with
+            <code>request_id, cmd, params…</code>; the bridge replies on
+            <code>…/ack</code>, <code>…/nack</code>, and <code>…/state</code>.
+            Override with <code>--osc-input-host/--osc-input-port</code>.
+          </div>
           <div class="add-row">
             <span class="row-flex">
               Forward sensor + actuator events as OSC/UDP. Edits save live.
