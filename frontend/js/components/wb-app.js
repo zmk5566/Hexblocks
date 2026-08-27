@@ -21,6 +21,7 @@ import './wb-llm-panel.js';
 import './wb-devices-panel.js';
 import './wb-eca-inspector.js';
 import './wb-osc-panel.js';
+import './wb-config-panel.js';
 import { decodeBytecode } from '../eca-decoder.js';
 
 const DEFAULT_MODULE_COLOR = '#888888';
@@ -62,6 +63,10 @@ export class WbApp extends LitElement {
     _ecaRules:       { type: Object,  state: true },  // decoded JSON, null if no program
     _oscOpen:        { type: Boolean, state: true },
     _oscActiveCount: { type: Number,  state: true },
+    _wifiInfo:       { type: Object,  state: true },
+    _configOpen:     { type: Boolean, state: true },
+    _configTargetType: { type: String, state: true },
+    _configTargetUid:  { type: String, state: true },
   };
 
   static styles = css`
@@ -193,6 +198,10 @@ export class WbApp extends LitElement {
     this._workspaceRulesAutoDefault = false;
     this._oscOpen = false;
     this._oscActiveCount = 0;
+    this._wifiInfo = {};
+    this._configOpen = false;
+    this._configTargetType = 'hub';
+    this._configTargetUid = '';
     // Slot → uid lookup built up as we see hellos; lets us resolve
     // legacy slot-only messages from older bridges / sim paths.
     this._slotToUid = new Map();
@@ -282,7 +291,7 @@ export class WbApp extends LitElement {
         // face=parent_face, and (b) the sim path / future producers
         // shouldn't be required to know the alias semantics.
         let face = msg.face ?? msg.parent_face ?? 0;
-        if (msg.parent_is_hub === false) face = 0;
+        if (msg.parent_is_hub === false || msg.parent_remote) face = 0;
         const existing = uid
           ? this._modules.findIndex(m => m.uid === uid)
           : this._modules.findIndex(m => m.slot === msg.slot);
@@ -305,7 +314,13 @@ export class WbApp extends LitElement {
           // parentFace defaults to 0.
           parent_uid: msg.parent_uid ?? null,
           parent_is_hub: msg.parent_is_hub ?? null,
+          parent_remote: msg.parent_remote ?? false,
           parent_face: msg.parent_face ?? 0,
+          active_link: msg.active_link ?? prev?.active_link ?? null,
+          transport_mode: msg.transport_mode ?? prev?.transport_mode ?? null,
+          topology_state: msg.topology_state ?? prev?.topology_state ?? null,
+          logger_status: prev?.logger_status,
+          logger_config: prev?.logger_config,
           active: true,
         };
         if (existing >= 0) {
@@ -348,7 +363,7 @@ export class WbApp extends LitElement {
             }
             if (filtered.size) nextChildren.set(parent, filtered);
           }
-          if (msg.parent_is_hub === false && msg.parent_uid != null) {
+          if (msg.parent_is_hub === false && !msg.parent_remote && msg.parent_uid != null) {
             const parentFaceMap = new Map(nextChildren.get(msg.parent_uid) || []);
             parentFaceMap.set(msg.parent_face, uid);
             nextChildren.set(msg.parent_uid, parentFaceMap);
@@ -431,6 +446,8 @@ export class WbApp extends LitElement {
             parent_uid: null,
             parent_is_hub: null,
             parent_face: 0,
+            logger_status: undefined,
+            logger_config: undefined,
           }];
         }
         const key = uid ?? msg.slot;
@@ -506,13 +523,14 @@ export class WbApp extends LitElement {
           // or 0 for a stacked child. parent_uid / parent_face track the
           // authoritative parent binding so wb-module-card can label
           // the relocation correctly instead of falling back to "orphan".
-          const newFaceAlias = msg.new_parent_is_hub === false
+          const newFaceAlias = (msg.new_parent_is_hub === false || msg.new_parent_remote)
             ? 0 : (msg.new_face ?? 0);
           updated[idx] = {
             ...updated[idx],
             face: newFaceAlias,
             parent_uid: msg.new_parent_uid ?? null,
             parent_is_hub: msg.new_parent_is_hub ?? null,
+            parent_remote: msg.new_parent_remote ?? false,
             parent_face: msg.new_face ?? 0,
           };
           this._modules = updated;
@@ -530,7 +548,7 @@ export class WbApp extends LitElement {
             }
             if (filtered.size) nextChildren.set(parent, filtered);
           }
-          if (msg.new_parent_is_hub === false && msg.new_parent_uid != null) {
+          if (msg.new_parent_is_hub === false && !msg.new_parent_remote && msg.new_parent_uid != null) {
             const parentFaceMap = new Map(nextChildren.get(msg.new_parent_uid) || []);
             parentFaceMap.set(msg.new_face, uid);
             nextChildren.set(msg.new_parent_uid, parentFaceMap);
@@ -624,7 +642,12 @@ export class WbApp extends LitElement {
         const key = uid ?? msg.slot;
         if (key == null) break;
         const next = new Map(this._actuatorByUid);
-        next.set(key, { led: msg.led, vib: msg.vib, motors: msg.motors });
+        next.set(key, {
+          led: msg.led,
+          vib: msg.vib,
+          audio: msg.audio,
+          motors: msg.motors,
+        });
         this._actuatorByUid = next;
         break;
       }
@@ -635,10 +658,93 @@ export class WbApp extends LitElement {
           uid: msg.uid,
           parent_uid: msg.parent_uid,
           parent_is_hub: msg.parent_is_hub,
+          parent_remote: msg.parent_remote ?? false,
           parent_face: msg.parent_face,
         });
         break;
       }
+      case 'link_state': {
+        const idx = uid
+          ? this._modules.findIndex(m => m.uid === uid)
+          : -1;
+        if (idx >= 0) {
+          const updated = [...this._modules];
+          updated[idx] = {
+            ...updated[idx],
+            active_link: msg.active_link,
+            transport_mode: msg.transport_mode,
+            topology_state: msg.topology_state,
+          };
+          if (msg.topology_state === 'remote_unplaced') {
+            updated[idx].face = 0;
+            updated[idx].parent_uid = null;
+            updated[idx].parent_is_hub = false;
+            updated[idx].parent_remote = true;
+            updated[idx].parent_face = 0;
+          }
+          this._modules = updated;
+        }
+        break;
+      }
+      case 'logger_status': {
+        const idx = uid
+          ? this._modules.findIndex(m => m.uid === uid)
+          : -1;
+        if (idx >= 0) {
+          const updated = [...this._modules];
+          updated[idx] = {
+            ...updated[idx],
+            logger_status: {
+              queue_depth: msg.queue_depth,
+              dropped_count: msg.dropped_count,
+              last_ack_ms: msg.last_ack_ms,
+              rssi: msg.rssi,
+              snr: msg.snr,
+              time_quality: msg.time_quality,
+              config_rev: msg.config_rev,
+            },
+          };
+          this._modules = updated;
+        }
+        break;
+      }
+      case 'logger_config': {
+        const idx = uid
+          ? this._modules.findIndex(m => m.uid === uid)
+          : -1;
+        if (idx >= 0) {
+          const updated = [...this._modules];
+          updated[idx] = {
+            ...updated[idx],
+            logger_config: {
+              config_rev: msg.config_rev,
+              subscriptions: msg.subscriptions || [],
+            },
+          };
+          this._modules = updated;
+        }
+        break;
+      }
+      case 'wifi_ap':
+        this._wifiInfo = {
+          ...this._wifiInfo,
+          ssid: msg.ssid,
+          ip: msg.ip,
+          port: msg.port,
+        };
+        break;
+      case 'wifi_pass':
+        this._wifiInfo = {
+          ...this._wifiInfo,
+          password: msg.password,
+        };
+        break;
+      case 'wifi_token':
+        this._wifiInfo = {
+          ...this._wifiInfo,
+          token: msg.token,
+        };
+        break;
       case 'query_done': {
         const command = String(msg.command || '').toUpperCase();
         const hasRows = this._topoBuffer.length > 0;
@@ -749,7 +855,7 @@ export class WbApp extends LitElement {
     const liveUids = new Set();
     for (const row of rows) {
       liveUids.add(row.uid);
-      if (!row.parent_is_hub && row.parent_uid != null) {
+      if (!row.parent_is_hub && !row.parent_remote && row.parent_uid != null) {
         const faceMap = nextChildren.get(row.parent_uid) || new Map();
         faceMap.set(row.parent_face, row.uid);
         nextChildren.set(row.parent_uid, faceMap);
@@ -787,7 +893,7 @@ export class WbApp extends LitElement {
           uid: row.uid,
           id: '',
           name: '(loading)',
-          face: row.parent_is_hub ? row.parent_face : 0,
+          face: row.parent_is_hub && !row.parent_remote ? row.parent_face : 0,
           slot: null,
           color: DEFAULT_MODULE_COLOR,
           capabilities: [],
@@ -797,7 +903,9 @@ export class WbApp extends LitElement {
           fw_hash: '',
           parent_uid: row.parent_uid ?? null,
           parent_is_hub: row.parent_is_hub ?? null,
+          parent_remote: row.parent_remote ?? false,
           parent_face: row.parent_face ?? 0,
+          topology_state: row.parent_remote ? 'remote_unplaced' : null,
           active: true,
         });
         knownUids.add(row.uid);
@@ -809,10 +917,12 @@ export class WbApp extends LitElement {
     for (const row of rows) {
       if (!row.uid) continue;
       parentUpdate.set(row.uid, {
-        face: row.parent_is_hub ? row.parent_face : 0,
+        face: row.parent_is_hub && !row.parent_remote ? row.parent_face : 0,
         parent_uid: row.parent_uid ?? null,
         parent_is_hub: row.parent_is_hub ?? null,
+        parent_remote: row.parent_remote ?? false,
         parent_face: row.parent_face ?? 0,
+        topology_state: row.parent_remote ? 'remote_unplaced' : null,
       });
     }
     if (parentUpdate.size || placeholders.length) {
@@ -872,6 +982,16 @@ export class WbApp extends LitElement {
     if (!this._openPanels.includes(key)) {
       this._openPanels = [...this._openPanels, key];
     }
+  }
+
+  _onOpenConfig(e) {
+    const targetType = e.detail?.targetType || 'hub';
+    const mod = targetType === 'module'
+      ? this._findModule(e.detail?.uid, e.detail?.slot)
+      : null;
+    this._configTargetType = targetType === 'module' ? 'module' : 'hub';
+    this._configTargetUid = mod?.uid || e.detail?.uid || '';
+    this._configOpen = true;
   }
 
   _onClosePanel(e) {
@@ -955,9 +1075,12 @@ export class WbApp extends LitElement {
     const hubPresent = hasHubPresence(this._transport, visibleModules);
     return html`
       <div class="main-row">
-        <div class="sidebar-left" @open-panel=${this._onOpenPanel}>
+        <div class="sidebar-left"
+             @open-panel=${this._onOpenPanel}
+             @open-config=${this._onOpenConfig}>
           <wb-palette
             .modules=${visibleModules}
+            .wifiInfo=${this._wifiInfo}
             .hubPresent=${hubPresent}>
           </wb-palette>
         </div>
@@ -1033,6 +1156,15 @@ export class WbApp extends LitElement {
         ?open=${this._oscOpen}
         @close=${() => this._oscOpen = false}>
       </wb-osc-panel>
+
+      <wb-config-panel
+        ?open=${this._configOpen}
+        .targetType=${this._configTargetType}
+        .targetUid=${this._configTargetUid}
+        .modules=${visibleModules}
+        .wifiInfo=${this._wifiInfo}
+        @close=${() => this._configOpen = false}>
+      </wb-config-panel>
 
       <wb-eca-inspector
         ?open=${this._ecaInspectorOpen}

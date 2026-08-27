@@ -9,7 +9,7 @@ Usage:
   python serial_bridge.py --sim                    # interactive multi-module simulator
   python serial_bridge.py --sim-demo               # auto-load demo (HR stacked on IMU)
 """
-import argparse, asyncio, base64, json, math, os, random, re, sys, time, threading
+import argparse, asyncio, base64, copy, json, math, os, random, re, sys, time, threading
 from collections import deque
 from datetime import datetime
 from functools import partial
@@ -19,7 +19,15 @@ from pathlib import Path
 import serial
 import websockets
 
-from wb_eca import ECAEngine, Act, CH, Action as EcaAction
+from wb_eca import ECAEngine, Act, ActionMode, CH, Action as EcaAction
+from logger_profile import (
+    MAX_SUBSCRIPTIONS as LOGGER_MAX_SUBSCRIPTIONS,
+    MODES as LOGGER_MODES,
+    RECORD_TYPES as LOGGER_RECORD_TYPES,
+    default_config_rev as logger_default_config_rev,
+    decode_profile as decode_logger_profile,
+    encode_profile_base64,
+)
 from wb_protocol import parse_line as _parse_wire
 import serial_io
 from transport import (
@@ -180,6 +188,9 @@ COLOR_MAP = {
     "amplifier": "#9885BF", "speaker": "#9885BF",
     "tone": "#9885BF", "tone_generation": "#9885BF",
     "tone_generator": "#9885BF",
+    "wireless_uplink": "#4FA7A1", "logger": "#4FA7A1",
+    "lora": "#4FA7A1", "loralog": "#4FA7A1",
+    "lora_uplink": "#4FA7A1", "batch_log": "#4FA7A1",
     "motor": "#D97757", "dual_motor": "#D97757",
     "motor_output": "#D97757",
     "knob": "#98AF6F", "rotary": "#98AF6F",
@@ -188,7 +199,8 @@ COLOR_MAP = {
 }
 COLOR_PREFIXES = (
     "imu", "acc", "hr", "spo", "tmp", "temp", "bme",
-    "vib", "led", "light", "audio", "amp", "motor", "knob", "hub",
+    "vib", "led", "light", "audio", "amp", "knob", "hub",
+    "lora", "logger", "motor",
 )
 
 # Category → sensor type shorthand (for WebSocket "sensor" field)
@@ -200,6 +212,7 @@ CAT_MAP = {
     "haptic_output":  "vibration",
     "light_sensing":  "light",
     "audio_output":   "audio",
+    "wireless_uplink": "logger",
     "motor_output":   "motor",
 }
 
@@ -218,10 +231,13 @@ clients: set = set()
 modules_by_uid: dict = {}           # uid → mod_id
 module_types_by_uid: dict = {}      # uid → sensor type shorthand
 msg_cache_by_uid: dict = {}         # uid → {"hello": msg, "descriptor": msg}
+link_cache_by_uid: dict = {}        # uid → latest link_state msg
 # Stack relationships keyed by parent UID + face.
 stack_cache_by_uid: dict = {}       # (parent_uid, parent_face) → child_stack msg
 # Latest actuator state per uid (LED + vib).
 actuator_cache_by_uid: dict = {}    # uid → actuator_state msg
+logger_status_by_uid: dict = {}     # uid → latest logger_status msg
+logger_config_by_uid: dict = {}     # uid → latest bridge-sent logger_config msg
 
 # `$Q,DONE` is intentionally compact on the firmware wire, so the bridge tracks
 # the outbound query commands that are known to terminate with DONE and annotates
@@ -230,6 +246,13 @@ actuator_cache_by_uid: dict = {}    # uid → actuator_state msg
 QUERY_DONE_COMMANDS = {"STATUS", "TOPO", "ECA"}
 pending_query_done_commands: deque[str] = deque()
 topo_snapshot_uids: set[str] = set()
+WIRELESS_TRANSPORT_MODES = {
+    "can_only",
+    "wifi_only",
+    "can_primary_wifi_fallback",
+    "wifi_primary_can_fallback",
+    "dual_send_debug",
+}
 
 # Side indexes for sim / ECA dispatch — slot is CAN-bus addressing concept,
 # not exposed on the v2 wire. Populated by sim in commit 3.
@@ -292,6 +315,11 @@ SIM_CHANNEL_MAP = {
     "knob": {"knob": CH.KNOB},
     "light": {"light": CH.LIGHT},
 }
+
+
+def _sim_monotonic_ms() -> int:
+    """Monotonic clock for simulator scheduling; wall-clock jumps are irrelevant."""
+    return time.monotonic_ns() // 1_000_000
 
 # One global engine. The on_action callback is set later (after dispatch_action
 # is defined) to avoid forward-reference noise.
@@ -369,6 +397,123 @@ def color_for(*signals) -> str:
     return DEFAULT_MODULE_COLOR
 
 
+def _descriptor_tokens(desc: dict | None) -> set[str]:
+    tokens = set()
+
+    def add(value):
+        for token in _color_tokens(value) or ():
+            tokens.add(token)
+
+    if not isinstance(desc, dict):
+        return tokens
+    for key in ("id", "moduleId", "name", "type", "cat", "category"):
+        add(desc.get(key))
+    for cap in desc.get("caps", []) or []:
+        if not isinstance(cap, dict):
+            continue
+        for key in ("t", "type", "m", "modality"):
+            add(cap.get(key))
+    return tokens
+
+
+def _module_is_logger_uid(uid: str) -> bool:
+    uid = str(uid or "").strip().upper()
+    desc = msg_cache_by_uid.get(uid, {}).get("descriptor", {}).get("data")
+    if not desc:
+        slot = slot_by_uid.get(uid)
+        sim_mod = sim_modules.get(slot) if slot is not None else None
+        if sim_mod is not None:
+            desc = sim_mod.descriptor
+    tokens = _descriptor_tokens(desc)
+    mod_id = modules_by_uid.get(uid, "")
+    tokens.update(_color_tokens(mod_id) or [])
+    return bool({
+        "loralogv1", "loralog", "logger", "wireless_uplink",
+        "lora_uplink", "batch_log",
+    } & tokens)
+
+
+def _catalog_channel_ids_for_type(sensor_type: str) -> set[int]:
+    try:
+        catalog = load_channel_catalog(CHANNEL_CATALOG_PATH)
+    except Exception:
+        return set()
+    channels = catalog.get("channels", {})
+    names = catalog.get("sensor_capabilities", {}).get(sensor_type, []) or []
+    out = set()
+    for name in names:
+        entry = channels.get(name)
+        if isinstance(entry, dict) and isinstance(entry.get("id"), int):
+            out.add(int(entry["id"]))
+    return out
+
+
+def _channel_ids_for_uid(uid: str) -> set[int]:
+    uid = str(uid or "").strip().upper()
+    desc = msg_cache_by_uid.get(uid, {}).get("descriptor", {}).get("data")
+    tokens = _descriptor_tokens(desc)
+    sensor_type = module_types_by_uid.get(uid)
+    if sensor_type:
+        tokens.add(sensor_type)
+    ids = set()
+    for token in tokens:
+        ids.update(_catalog_channel_ids_for_type(token))
+    return ids
+
+
+def _validate_logger_subscriptions(raw_subs, logger_uid: str) -> list[dict]:
+    if not isinstance(raw_subs, list):
+        raise ValueError("subscriptions must be a list")
+    if len(raw_subs) > LOGGER_MAX_SUBSCRIPTIONS:
+        raise ValueError(f"too many subscriptions, max {LOGGER_MAX_SUBSCRIPTIONS}")
+
+    logger_uid = str(logger_uid or "").strip().upper()
+    normalized: list[dict] = []
+    seen = set()
+    for raw in raw_subs:
+        if not isinstance(raw, dict):
+            raise ValueError("subscription must be an object")
+        sub = {
+            "source_uid": str(raw.get("source_uid", "")).strip().upper().replace("0X", ""),
+            "channel_id": int(raw.get("channel_id", 0)),
+            "record_type": str(raw.get("record_type", "sensor")).strip(),
+            "mode": str(raw.get("mode", "latest_interval")).strip(),
+            "min_interval_ms": int(raw.get("min_interval_ms", 0)),
+            "threshold": float(raw.get("threshold", 0.0)),
+            "flags": int(raw.get("flags", 0)),
+        }
+        if sub["record_type"] not in LOGGER_RECORD_TYPES:
+            raise ValueError(f"bad record_type {sub['record_type']!r}")
+        if sub["mode"] not in LOGGER_MODES:
+            raise ValueError(f"bad logger mode {sub['mode']!r}")
+        if not re.fullmatch(r"[0-9A-F]{8}", sub["source_uid"]):
+            raise ValueError(f"bad source_uid {sub['source_uid']!r}")
+        if sub["source_uid"] == logger_uid:
+            raise ValueError("logger cannot subscribe to itself")
+        if sub["source_uid"] not in modules_by_uid:
+            raise ValueError(f"unknown source_uid {sub['source_uid']}")
+        if not 0 <= sub["channel_id"] < 48:
+            raise ValueError("channel_id must be 0..47")
+        if not 0 <= sub["min_interval_ms"] <= 86_400_000:
+            raise ValueError("min_interval_ms out of range")
+        if not math.isfinite(sub["threshold"]):
+            raise ValueError("threshold must be finite")
+        if not 0 <= sub["flags"] <= 255:
+            raise ValueError("flags must be 0..255")
+        if sub["record_type"] == "sensor":
+            allowed = _channel_ids_for_uid(sub["source_uid"])
+            if allowed and sub["channel_id"] not in allowed:
+                raise ValueError(
+                    f"channel {sub['channel_id']} is not advertised by {sub['source_uid']}"
+                )
+        key = (sub["source_uid"], sub["channel_id"], sub["record_type"])
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(sub)
+    return normalized
+
+
 def _track_query_command(command: str) -> None:
     cmd = str(command or "").strip().upper()
     if cmd in QUERY_DONE_COMMANDS:
@@ -430,14 +575,19 @@ def _consume_tracked_query_done(command: str) -> None:
 def _prune_uid_caches_to(live_uids: set[str]) -> None:
     """Drop bridge replay caches for UIDs absent from an authoritative TOPO."""
     cached_uids = (set(modules_by_uid) | set(module_types_by_uid)
-                   | set(msg_cache_by_uid) | set(actuator_cache_by_uid)
+                   | set(msg_cache_by_uid) | set(link_cache_by_uid)
+                   | set(actuator_cache_by_uid)
+                   | set(logger_status_by_uid) | set(logger_config_by_uid)
                    | set(slot_by_uid))
     dead_uids = cached_uids - live_uids
     for uid in dead_uids:
         modules_by_uid.pop(uid, None)
         module_types_by_uid.pop(uid, None)
         msg_cache_by_uid.pop(uid, None)
+        link_cache_by_uid.pop(uid, None)
         actuator_cache_by_uid.pop(uid, None)
+        logger_status_by_uid.pop(uid, None)
+        logger_config_by_uid.pop(uid, None)
         slot = slot_by_uid.pop(uid, None)
         if slot is not None:
             uid_by_slot.pop(slot, None)
@@ -483,6 +633,11 @@ def parse_line(raw: str):
         # window between cache replay and TOPO reconcile, which looks
         # exactly like an orphan module.
         msg["face"] = msg["parent_face"] if msg["parent_is_hub"] else 0
+        cached_link = link_cache_by_uid.get(uid)
+        if cached_link:
+            msg["active_link"] = cached_link.get("active_link")
+            msg["transport_mode"] = cached_link.get("transport_mode")
+            msg["topology_state"] = cached_link.get("topology_state")
         return msg
 
     if mtype == "descriptor":
@@ -556,6 +711,22 @@ def parse_line(raw: str):
         topo_snapshot_uids.add(msg["uid"])
         return msg
 
+    if mtype == "link_state":
+        uid = msg["uid"]
+        msg["slot"] = slot_by_uid.get(uid)
+        link_cache_by_uid[uid] = dict(msg)
+        cached = msg_cache_by_uid.get(uid, {}).get("hello")
+        if cached:
+            cached["active_link"] = msg.get("active_link")
+            cached["transport_mode"] = msg.get("transport_mode")
+            cached["topology_state"] = msg.get("topology_state")
+        return msg
+
+    if mtype == "logger_status":
+        uid = msg["uid"]
+        msg["slot"] = slot_by_uid.get(uid)
+        return msg
+
     if mtype == "query_done":
         cmd = pending_query_done_commands.popleft() if pending_query_done_commands else None
         # Back-compat for manually typed `$Q,TOPO` on the serial console or old
@@ -570,13 +741,13 @@ def parse_line(raw: str):
         topo_snapshot_uids.clear()
         return msg
 
-    # child_stack, child_unstack, command_ack: pass through unchanged.
+    # child_stack, child_unstack, command_ack, wifi_ap/pass/token:
+    # pass through unchanged.
     return msg
 
 
 def cache_msg(msg: dict):
-    """Cache hello/descriptor/module_info/child_stack/actuator_state messages for replay
-    to new clients.
+    """Cache replayable module/logger messages for new clients.
 
     Real-hardware child_stack/child_unstack messages don't carry a top-level
     `uid` (only `parent_uid`/`child_uid`), so they're routed by parent_uid
@@ -615,8 +786,15 @@ def cache_msg(msg: dict):
             msg_cache_by_uid.setdefault(uid, {})["descriptor"] = msg
         elif mtype == "module_info":
             msg_cache_by_uid.setdefault(uid, {})["module_info"] = msg
+        elif mtype == "link_state":
+            msg_cache_by_uid.setdefault(uid, {})["link_state"] = msg
+            link_cache_by_uid[uid] = dict(msg)
         elif mtype == "actuator_state":
             actuator_cache_by_uid[uid] = msg
+        elif mtype == "logger_status":
+            logger_status_by_uid[uid] = msg
+        elif mtype == "logger_config":
+            logger_config_by_uid[uid] = msg
         return
 
     # Legacy slot-keyed sim path (hello/descriptor/actuator only — stack
@@ -633,8 +811,9 @@ def cache_msg(msg: dict):
 
 
 async def broadcast(msg: dict):
-    if msg["type"] in ("hello", "descriptor", "module_info", "child_stack",
-                       "child_unstack", "actuator_state"):
+    if msg["type"] in ("hello", "descriptor", "module_info", "link_state", "child_stack",
+                       "child_unstack", "actuator_state", "logger_status",
+                       "logger_config"):
         try:
             cache_msg(msg)
         except Exception as e:
@@ -674,6 +853,7 @@ def _parse_line_selftest() -> None:
     def clear_state():
         for d in (modules_by_uid, module_types_by_uid, msg_cache_by_uid,
                   stack_cache_by_uid, actuator_cache_by_uid,
+                  logger_status_by_uid, logger_config_by_uid,
                   uid_by_slot, slot_by_uid):
             d.clear()
         pending_query_done_commands.clear()
@@ -705,6 +885,12 @@ def _parse_line_selftest() -> None:
         "cat": "audio_output",
         "caps": [{"m": "audio_synth"}],
     }) == "#9885BF"
+    lgd = parse_line('$D,FACE0010,{"id":"loralogv1","name":"LoRa Logger","cat":"wireless_uplink","caps":[{"t":"logger","m":"batch_log"}]}')
+    cache_msg(lgd)
+    assert _module_is_logger_uid("FACE0010")
+    lgs = parse_line("$L,FACE0010,3,2,123,-88,6.25,1,99")
+    assert (lgs["type"] == "logger_status" and lgs["slot"] is None
+            and lgs["queue_depth"] == 3 and lgs["config_rev"] == 99), lgs
 
     s = parse_line("$S,A1B2C3D4,5,0.1234")
     assert s["sensor"] == "imu" and s["slot"] == 3 and "ts" in s, s
@@ -778,12 +964,18 @@ async def ws_handler(ws):
             await ws.send(json.dumps(cached["hello"]))
         if "module_info" in cached:
             await ws.send(json.dumps(cached["module_info"]))
+        if "link_state" in cached:
+            await ws.send(json.dumps(cached["link_state"]))
         if "descriptor" in cached:
             await ws.send(json.dumps(cached["descriptor"]))
     for stack_msg in stack_cache_by_uid.values():
         await ws.send(json.dumps(stack_msg))
     for act_msg in actuator_cache_by_uid.values():
         await ws.send(json.dumps(act_msg))
+    for status_msg in logger_status_by_uid.values():
+        await ws.send(json.dumps(status_msg))
+    for config_msg in logger_config_by_uid.values():
+        await ws.send(json.dumps(config_msg))
     # Legacy slot-keyed replay — currently populated only by the sim path.
     for slot in sorted(msg_cache):
         cached = msg_cache[slot]
@@ -851,6 +1043,70 @@ async def ws_handler(ws):
                     target = _resolve_target(inbound)
                     if target is None: continue
                     await serial_write_queue.put(f"$TA {target}\n")
+                elif action == "wireless_info":
+                    await serial_write_queue.put("$W,INFO\n")
+                    print("[bridge] WS→serial: $W,INFO")
+                elif action == "wireless_config":
+                    mode = str(inbound.get("mode", "")).strip()
+                    if mode not in WIRELESS_TRANSPORT_MODES:
+                        print(f"[bridge] wireless_config: bad mode {mode!r}")
+                        continue
+                    target = str(inbound.get("target", "")).strip().upper()
+                    if target != "ALL":
+                        resolved = _resolve_target(inbound)
+                        target = str(resolved).strip().upper() if resolved else target
+                    if target != "ALL" and not re.fullmatch(r"[0-9A-F]{8}", target):
+                        print(f"[bridge] wireless_config: bad target {target!r}")
+                        continue
+                    line = f"$W,CONFIG {target} {mode}"
+                    await serial_write_queue.put(line + "\n")
+                    print(f"[bridge] WS→serial: {line}")
+                elif action == "logger_info":
+                    await serial_write_queue.put("$L,INFO\n")
+                    print("[bridge] WS→serial: $L,INFO")
+                elif action == "logger_config":
+                    target = _resolve_target(inbound)
+                    target = str(target or inbound.get("target", "")).strip().upper()
+                    if not re.fullmatch(r"[0-9A-F]{8}", target):
+                        await ws.send(json.dumps({
+                            "type": "logger_error",
+                            "text": "logger_config bad target",
+                        }))
+                        print(f"[bridge] logger_config: bad target {target!r}")
+                        continue
+                    if target not in modules_by_uid or not _module_is_logger_uid(target):
+                        await ws.send(json.dumps({
+                            "type": "logger_error",
+                            "text": "target is not a logger module",
+                        }))
+                        print(f"[bridge] logger_config: target not logger {target!r}")
+                        continue
+                    try:
+                        subs = _validate_logger_subscriptions(
+                            inbound.get("subscriptions", []), target)
+                        config_rev = int(inbound.get(
+                            "config_rev", logger_default_config_rev()))
+                        b64, decoded = encode_profile_base64(
+                            subs, config_rev=config_rev)
+                    except Exception as e:
+                        await ws.send(json.dumps({
+                            "type": "logger_error",
+                            "text": str(e),
+                        }))
+                        print(f"[bridge] logger_config: {e}")
+                        continue
+                    line = f"$L,CONFIG {target} {b64}"
+                    await serial_write_queue.put(line + "\n")
+                    cfg_msg = {
+                        "type": "logger_config",
+                        "uid": target,
+                        "slot": slot_by_uid.get(target),
+                        "config_rev": decoded["config_rev"],
+                        "subscriptions": decoded["subscriptions"],
+                    }
+                    await broadcast(cfg_msg)
+                    print(f"[bridge] WS→serial: $L,CONFIG {target} "
+                          f"(<{len(b64)} chars>, {len(subs)} subs)")
                 elif action == "sim_command":
                     # Browser-side preset buttons (D1-D4, clear, etc.)
                     # in --sim modes only. Silently no-op when not in sim.
@@ -1016,11 +1272,12 @@ async def _drive_transport(transport: Transport):
     # snapshot ahead of larger descriptor bursts on BLE notify links.
     for cmd in ("TOPO", "STATUS", "ECA"):
         await _queue_query_command(cmd)
+    await serial_write_queue.put("$L,INFO\n")
     recorder.note(f"transport connected: {transport.name} "
                   f"{transport.label} ({transport.address}); "
-                  "queued $Q,TOPO + $Q,STATUS + $Q,ECA")
+                  "queued $Q,TOPO + $Q,STATUS + $Q,ECA + $L,INFO")
     print(f"[bridge] {transport.name} connected: {transport.label} "
-          f"({transport.address}) — queued $Q,TOPO + $Q,STATUS + $Q,ECA")
+          f"({transport.address}) — queued $Q,TOPO + $Q,STATUS + $Q,ECA + $L,INFO")
     try:
         while transport.is_open:
             # Drain write queue
@@ -1215,7 +1472,8 @@ async def _serial_loop_legacy(port: str):
             _drop_pending_query_writes("fresh serial sync")
             for cmd in ("TOPO", "STATUS", "ECA"):
                 await _queue_query_command(cmd)
-            print("[bridge] sent $Q,TOPO + $Q,STATUS + $Q,ECA to hub (initial sync)")
+            await serial_write_queue.put("$L,INFO\n")
+            print("[bridge] sent $Q,TOPO + $Q,STATUS + $Q,ECA + $L,INFO to hub (initial sync)")
             while True:
                 # Drain write queue → send commands to hub
                 while not serial_write_queue.empty():
@@ -1407,8 +1665,32 @@ SIM_MODULE_DEFS = {
         },
         "hz": 0,  # actuator, no streaming
     },
+    "loralog": {
+        "id": "loralogv1", "slot": 10, "face": 4, "color": "#4FA7A1",
+        "descriptor": {
+            "id": "loralogv1", "name": "LoRa Logger",
+            "cat": "wireless_uplink", "color": "#4FA7A1", "ver": "1.0",
+            "caps": [
+                {"t": "transport", "m": "lora_uplink", "ax": 1,
+                 "rn": 0, "rx": 1, "res": 1, "dt": "batch", "sr": []},
+                {"t": "logger", "m": "batch_log", "ax": 1,
+                 "rn": 0, "rx": LOGGER_MAX_SUBSCRIPTIONS, "res": 1,
+                 "dt": "record_batch", "sr": []},
+            ],
+            "affs": ["log_sensor_topics", "uplink_batches", "cache_offline"],
+            "pwr": {"v": 3.3, "i": 38, "ip": 140},
+            "phy": {"w": 8.0, "dim": [28, 28, 8], "plc": ["belt", "backpack"]},
+            "cfg": [
+                {"k": "logger_profile", "t": "bytes", "d": "empty",
+                 "l": "Forward topics"},
+            ],
+        },
+        "hz": 0,
+    },
     "motor": {
-        "id": "motorv1", "slot": 8, "face": 1, "color": "#D97757",
+        # Slots 8-10 belong to the two remote modules and LoRa logger in the
+        # combined simulator. Slot 11 is the remaining ECA-addressable slot.
+        "id": "motorv1", "slot": 11, "face": 1, "color": "#D97757",
         "descriptor": {
             "id": "motorv1", "name": "Dual DC Motor", "cat": "motor_output",
             "color": "#D97757", "ver": "1.0",
@@ -1439,6 +1721,24 @@ SIM_MODULE_DEFS = {
         "hz": 0,
     },
 }
+
+SIM_MODULE_DEFS["remote_temp"] = copy.deepcopy(SIM_MODULE_DEFS["temp"])
+SIM_MODULE_DEFS["remote_temp"].update({
+    "id": "tmpw1", "slot": 8, "face": 0, "remote": True,
+    "data_type": "temp",
+})
+SIM_MODULE_DEFS["remote_temp"]["descriptor"].update({
+    "id": "tmpw1", "name": "Remote Temp/Humidity",
+})
+
+SIM_MODULE_DEFS["remote_hr"] = copy.deepcopy(SIM_MODULE_DEFS["hr"])
+SIM_MODULE_DEFS["remote_hr"].update({
+    "id": "hrw1", "slot": 9, "face": 0, "remote": True,
+    "data_type": "hr",
+})
+SIM_MODULE_DEFS["remote_hr"]["descriptor"].update({
+    "id": "hrw1", "name": "Remote Heart Rate",
+})
 
 
 def _noise(scale: float = 0.01) -> float:
@@ -1485,6 +1785,8 @@ class SimModule:
     def __init__(self, mod_type: str):
         defn = SIM_MODULE_DEFS[mod_type]
         self.mod_type = mod_type
+        self.data_type = defn.get("data_type", mod_type)
+        self.remote = bool(defn.get("remote", False))
         self.mod_id = defn["id"]
         self.slot = defn["slot"]
         # Stable synthetic UID per slot — matches the 8-hex-char format the
@@ -1494,7 +1796,7 @@ class SimModule:
         # Chars must be valid hex (0-9, a-f) so the ECA bytecode encoder
         # can parse uid → u32. "FACE" is the prefix; slot fills the low 16 bits.
         self.uid = f"FACE{self.slot:04X}"
-        self.face = defn["face"]
+        self.face = 0 if self.remote else defn["face"]
         self.color = defn["color"]
         self.descriptor = defn["descriptor"]
         self.hz = defn["hz"]
@@ -1511,11 +1813,16 @@ class SimModule:
         # Actuator runtime state (only meaningful for LED/VIB modules; harmless
         # to carry on sensors). until_ms == 0 means "no expiry scheduled".
         self.led = {"r": 0, "g": 0, "b": 0, "brightness": 0,
-                    "mode": "off", "until_ms": 0}
-        self.vib = {"intensity": 0, "mode": "off", "until_ms": 0}
+                    "mode": "off", "until_ms": 0, "_deadline_ms": 0}
+        self.vib = {"intensity": 0, "mode": "off", "until_ms": 0,
+                    "_deadline_ms": 0}
+        self.audio = {"frequency_hz": 0, "amplitude": 0, "mode": "off",
+                      "until_ms": 0, "_deadline_ms": 0}
         self.motors = {
-            1: {"mode": "stop", "speed": 0, "until_ms": 0},
-            2: {"mode": "stop", "speed": 0, "until_ms": 0},
+            1: {"mode": "stop", "speed": 0, "until_ms": 0,
+                "_deadline_ms": 0},
+            2: {"mode": "stop", "speed": 0, "until_ms": 0,
+                "_deadline_ms": 0},
         }
         # One-shot sensor spike: {channel_id: (override_value, expires_ms)}.
         # Consumed by sim_sensor_data via _spike_override; auto-cleared.
@@ -1526,7 +1833,8 @@ class SimModule:
             "type": "hello", "uid": self.uid,
             "id": self.mod_id, "face": self.face,
             "slot": self.slot, "color": self.color,
-            "parent_uid": None, "parent_is_hub": True,
+            "parent_uid": None, "parent_is_hub": not self.remote,
+            "parent_remote": self.remote,
             "parent_face": self.face,
         })
 
@@ -1542,13 +1850,13 @@ class SimModule:
         if self.hz <= 0 or not self.active:
             return
         t = time.time() - self.t0
-        data = sim_sensor_data(self.mod_type, t)
+        data = sim_sensor_data(self.data_type, t)
         if not data:
             return
         # Apply any one-shot spike overrides. A spike replaces the generator
         # output for a single channel until its expiry time passes.
-        now_ms = int(time.time() * 1000)
-        ch_map = SIM_CHANNEL_MAP.get(self.mod_type, {})
+        now_ms = _sim_monotonic_ms()
+        ch_map = SIM_CHANNEL_MAP.get(self.data_type, {})
         if self.spikes:
             # Reverse lookup channel_id → data key so spikes can target CH.AX
             # directly regardless of the module's per-type remap.
@@ -1569,7 +1877,7 @@ class SimModule:
         for key, ch_id in ch_map.items():
             if key in data:
                 eca.update_sensor(self.slot, int(ch_id), float(data[key]))
-        sensor_type = CAT_MAP.get(self.descriptor.get("cat", ""), self.mod_type)
+        sensor_type = CAT_MAP.get(self.descriptor.get("cat", ""), self.data_type)
         # Emit one v2-shaped per-channel frame per channel in this module's
         # capability map — this is what the real hub emits on the wire. Keep
         # the legacy batched frame as a secondary broadcast during the
@@ -1583,6 +1891,8 @@ class SimModule:
                 "sensor": sensor_type, "channel_id": int(ch_id),
                 "value": float(data[key]), "ts": now_ms,
             })
+            await _sim_logger_consume_sensor(self.uid, int(ch_id),
+                                             float(data[key]), now_ms)
         await broadcast({
             "type": "sensor", "uid": self.uid, "slot": self.slot,
             "sensor": sensor_type, "ts": now_ms, "data": data,
@@ -1594,8 +1904,17 @@ class SimModule:
 sim_modules: dict[int, SimModule] = {}  # slot → SimModule
 # Parent tracking for stacked modules:  child_slot → (parent_slot, parent_face)
 sim_parents: dict[int, tuple[int, int]] = {}
+sim_transport_modes: dict[str, str] = {}
+sim_logger_profiles: dict[str, dict] = {}
+sim_logger_status: dict[str, dict] = {}
 sim_eca_b64: str = ""
 sim_eca_raw_len: int = 0
+SIM_DEFAULT_TRANSPORT_MODE = "can_primary_wifi_fallback"
+SIM_WIFI_SSID = "HEX-SIM-HUB"
+SIM_WIFI_PASSWORD = "hex-sim-pass"
+SIM_WIFI_TOKEN = "sim-osc-token"
+SIM_WIFI_IP = "192.168.4.1"
+SIM_WIFI_PORT = 9000
 
 # Set by sim_loop() so the WS handler can inject sim commands (e.g.
 # "demo1") from the browser preset buttons.
@@ -1727,7 +2046,8 @@ def dispatch_action(act: EcaAction) -> None:
         return
     mod.last_action_route = "local" if mod.is_builtin else "can"
     cmd = act.cmd
-    now_ms = int(time.time() * 1000)
+    now_ms = _sim_monotonic_ms()
+    wall_ms = int(time.time() * 1000)
     vals = act.vals or []
 
     def vget(i: int, default: float = 0.0) -> float:
@@ -1736,36 +2056,62 @@ def dispatch_action(act: EcaAction) -> None:
     def vbyte(i: int) -> int:
         return max(0, min(255, int(vget(i) + 0.5)))
 
+    def deadlines(duration_ms: int) -> dict:
+        if act.mode == ActionMode.STREAM:
+            duration_ms = max(100, min(2550, act.update_interval_ms * 3))
+        duration_ms = max(0, duration_ms)
+        return {
+            "until_ms": wall_ms + duration_ms if duration_ms > 0 else 0,
+            "_deadline_ms": now_ms + duration_ms if duration_ms > 0 else 0,
+        }
+
     # ── LED commands ───────────────────────────────
     if cmd in (Act.LED_OFF, Act.LED_STOP):
         mod.led = {"r": 0, "g": 0, "b": 0, "brightness": 0,
-                   "mode": "off", "until_ms": 0}
+                   "mode": "off", "until_ms": 0, "_deadline_ms": 0}
     elif cmd == Act.LED_SOLID:
-        # 3 params: R, G, B (each 0..255). No duration in v2 — SOLID is
-        # set-and-hold; subsequent SOLID/OFF replaces it.
+        # 3 params: R, G, B. Lifecycle duration is carried separately in v4.
         mod.led = {"r": vbyte(0), "g": vbyte(1), "b": vbyte(2),
-                   "brightness": 255, "mode": "solid", "until_ms": 0}
+                   "brightness": 255, "mode": "solid",
+                   **deadlines(act.duration_ms)}
     elif cmd in (Act.LED_BLINK, Act.LED_BREATHE, Act.LED_RAMP, Act.LED_RAINBOW):
         # Reserved — module_led v3 doesn't implement these. Treat as SOLID
         # with the first 3 params (forward-compatible passthrough).
         mod.led = {"r": vbyte(0), "g": vbyte(1), "b": vbyte(2),
-                   "brightness": 255, "mode": "solid", "until_ms": 0}
+                   "brightness": 255, "mode": "solid",
+                   **deadlines(act.duration_ms)}
 
     # ── Vibration commands ─────────────────────────
     elif cmd == Act.VIBRATE:
         intensity = vbyte(0)
-        dur_ms = max(0, int(vget(1) + 0.5))
+        dur_ms = act.duration_ms or max(0, int(vget(1) + 0.5))
         mod.vib = {"intensity": intensity, "mode": "on",
-                   "until_ms": (now_ms + dur_ms) if dur_ms > 0 else 0}
+                   **deadlines(dur_ms)}
     elif cmd == Act.VIBRATE_PULSE:
         intensity = vbyte(0)
-        on_10ms = vbyte(1); off_10ms = vbyte(2); count = vbyte(3) or 1
-        total = (on_10ms + off_10ms) * 10 * max(1, count)
+        on_ms = max(1, int(vget(1, 100) + 0.5))
+        off_ms = max(0, int(vget(2, 100) + 0.5))
+        count = vbyte(3) or 1
+        total = act.duration_ms or ((on_ms + off_ms) * max(1, count))
         mod.vib = {"intensity": intensity, "mode": "pulse",
-                   "on_ms": on_10ms * 10, "off_ms": off_10ms * 10,
-                   "count": count, "until_ms": now_ms + total}
+                   "on_ms": on_ms, "off_ms": off_ms, "count": count,
+                   **deadlines(total)}
+    elif cmd == Act.VIBRATE_RAMP:
+        total = act.duration_ms
+        mod.vib = {"intensity": vbyte(1), "from": vbyte(0), "mode": "ramp",
+                   **deadlines(total)}
     elif cmd == Act.VIBRATE_STOP:
-        mod.vib = {"intensity": 0, "mode": "off", "until_ms": 0}
+        mod.vib = {"intensity": 0, "mode": "off", "until_ms": 0,
+                   "_deadline_ms": 0}
+
+    # ── Audio commands ─────────────────────────────
+    elif cmd == Act.AUDIO_SET_TONE:
+        mod.audio = {"frequency_hz": max(0, min(65535, int(vget(0) + 0.5))),
+                     "amplitude": vbyte(1), "mode": "tone",
+                     **deadlines(act.duration_ms)}
+    elif cmd == Act.AUDIO_STOP:
+        mod.audio = {"frequency_hz": 0, "amplitude": 0, "mode": "off",
+                     "until_ms": 0, "_deadline_ms": 0}
 
     # ── Dual DC motor command ───────────────────────
     elif cmd == Act.MOTOR_SET:
@@ -1777,12 +2123,15 @@ def dispatch_action(act: EcaAction) -> None:
             print(f"  [sim] invalid MOTOR_SET motor={motor} mode={mode} — ignored")
             return
         if mode == 0 or speed == 0:
-            mod.motors[motor] = {"mode": "stop", "speed": 0, "until_ms": 0}
+            mod.motors[motor] = {
+                "mode": "stop", "speed": 0, "until_ms": 0,
+                "_deadline_ms": 0,
+            }
         else:
             mod.motors[motor] = {
                 "mode": "forward" if mode == 1 else "reverse",
                 "speed": speed,
-                "until_ms": (now_ms + duration_ms) if duration_ms > 0 else 0,
+                **deadlines(duration_ms),
             }
 
     print(f"  [sim] ECA fired: target_uid={uid_hex} (slot={target_slot}) cmd={cmd}")
@@ -1791,7 +2140,7 @@ def dispatch_action(act: EcaAction) -> None:
 # Bind the engine to the dispatcher now that dispatch_action exists.
 eca._on_action = dispatch_action
 
-# v3 ECA bytecode is uid-keyed; the engine asks back via this hook to
+# v4 ECA bytecode is uid-keyed; the engine asks back via this hook to
 # translate uid (u32) → sim slot for sensor cache lookups inside SLOT refs.
 # Same shape as the real hub's registry.findByUid().
 def _sim_uid_to_slot(uid_u32: int) -> int:
@@ -1801,17 +2150,25 @@ eca.set_uid_resolver(_sim_uid_to_slot)
 
 def expire_actuator_state(mod: SimModule, now_ms: int) -> None:
     """Expire timed actuator channels without coupling independent outputs."""
-    led_until = mod.led.get("until_ms", 0)
-    if led_until and now_ms >= led_until:
+    led_deadline = mod.led.get("_deadline_ms", 0)
+    if led_deadline and now_ms >= led_deadline:
         mod.led = {"r": 0, "g": 0, "b": 0, "brightness": 0,
-                   "mode": "off", "until_ms": 0}
-    vib_until = mod.vib.get("until_ms", 0)
-    if vib_until and now_ms >= vib_until:
-        mod.vib = {"intensity": 0, "mode": "off", "until_ms": 0}
+                   "mode": "off", "until_ms": 0, "_deadline_ms": 0}
+    vib_deadline = mod.vib.get("_deadline_ms", 0)
+    if vib_deadline and now_ms >= vib_deadline:
+        mod.vib = {"intensity": 0, "mode": "off", "until_ms": 0,
+                   "_deadline_ms": 0}
+    audio_deadline = mod.audio.get("_deadline_ms", 0)
+    if audio_deadline and now_ms >= audio_deadline:
+        mod.audio = {"frequency_hz": 0, "amplitude": 0, "mode": "off",
+                     "until_ms": 0, "_deadline_ms": 0}
     for motor in (1, 2):
-        until_ms = mod.motors[motor].get("until_ms", 0)
-        if until_ms and now_ms >= until_ms:
-            mod.motors[motor] = {"mode": "stop", "speed": 0, "until_ms": 0}
+        deadline = mod.motors[motor].get("_deadline_ms", 0)
+        if deadline and now_ms >= deadline:
+            mod.motors[motor] = {
+                "mode": "stop", "speed": 0, "until_ms": 0,
+                "_deadline_ms": 0,
+            }
 
 
 def _resolve_sim_target(token: str) -> int | None:
@@ -1879,11 +2236,16 @@ def _parse_sim_command(line: str) -> None:
             # Reset all actuators when program cleared.
             for s, m in sim_modules.items():
                 m.led = {"r": 0, "g": 0, "b": 0, "brightness": 0,
-                         "mode": "off", "until_ms": 0}
-                m.vib = {"intensity": 0, "mode": "off", "until_ms": 0}
+                         "mode": "off", "until_ms": 0, "_deadline_ms": 0}
+                m.vib = {"intensity": 0, "mode": "off", "until_ms": 0,
+                         "_deadline_ms": 0}
+                m.audio = {"frequency_hz": 0, "amplitude": 0, "mode": "off",
+                           "until_ms": 0, "_deadline_ms": 0}
                 m.motors = {
-                    1: {"mode": "stop", "speed": 0, "until_ms": 0},
-                    2: {"mode": "stop", "speed": 0, "until_ms": 0},
+                    1: {"mode": "stop", "speed": 0, "until_ms": 0,
+                        "_deadline_ms": 0},
+                    2: {"mode": "stop", "speed": 0, "until_ms": 0,
+                        "_deadline_ms": 0},
                 }
             asyncio.create_task(_ack("cleared"))
             print("  [sim] ECA cleared")
@@ -1904,7 +2266,7 @@ def _parse_sim_command(line: str) -> None:
             # $A's free-form params are positional bytes — wrap each as a
             # CONST-typed action param so the float-resolving dispatch path
             # gives the same byte values as the legacy raw-bytes path.
-            # v3 actions take a u32 target (uid). _resolve_sim_target() above
+            # v4 actions take a u32 target (uid). _resolve_sim_target() above
             # already gave us the sim slot; we look up its uid here.
             from wb_eca import ActionParam, REF as _REF
             mod = sim_modules.get(slot)
@@ -1929,6 +2291,66 @@ def _parse_sim_command(line: str) -> None:
             else:
                 print(f"  [sim] (topic op ignored in sim) {line}")
                 asyncio.create_task(_ack(f"{op} slot={slot}"))
+        elif line == "$W,INFO":
+            asyncio.create_task(_emit_sim_wireless_info())
+        elif line.startswith("$W,CONFIG "):
+            parts = line.split()
+            if len(parts) < 3:
+                asyncio.create_task(_ack("$W,CONFIG: need target + mode", ok=False))
+                return
+            target = parts[1].strip().upper()
+            mode = parts[2].strip()
+            if mode not in WIRELESS_TRANSPORT_MODES:
+                asyncio.create_task(_ack(f"W bad_mode {mode}", ok=False))
+                return
+            if target == "ALL":
+                mods = list(sim_modules.values())
+            else:
+                slot = _resolve_sim_target(target)
+                if slot is None:
+                    asyncio.create_task(_ack(f"W bad_target {target}", ok=False))
+                    return
+                mods = [sim_modules[slot]]
+            for mod in mods:
+                sim_transport_modes[mod.uid] = mode
+                asyncio.create_task(_emit_sim_link_state(mod.uid))
+            print(f"  [sim] wireless config {target} -> {mode}")
+            asyncio.create_task(_ack(f"W CONFIG {target} {mode}"))
+        elif line == "$L,INFO":
+            asyncio.create_task(_emit_sim_logger_info())
+        elif line.startswith("$L,CONFIG "):
+            parts = line.split(maxsplit=2)
+            if len(parts) < 3:
+                asyncio.create_task(_ack("$L,CONFIG: need target + profile", ok=False))
+                return
+            target = parts[1].strip().upper()
+            slot = _resolve_sim_target(target)
+            if slot is None or slot not in sim_modules:
+                asyncio.create_task(_ack(f"L bad_target {target}", ok=False))
+                return
+            mod = sim_modules[slot]
+            if not _module_is_logger_uid(mod.uid):
+                asyncio.create_task(_ack(f"L target_not_logger {target}", ok=False))
+                return
+            raw = base64.b64decode(parts[2].strip())
+            decoded = decode_logger_profile(raw)
+            sim_logger_profiles[mod.uid] = decoded
+            stats = _sim_logger_status_for(mod.uid)
+            stats["config_rev"] = decoded["config_rev"]
+            stats["queue_depth"] = 0
+            stats["last_emit"] = {}
+            stats["last_value"] = {}
+            asyncio.create_task(broadcast({
+                "type": "logger_config",
+                "uid": mod.uid,
+                "slot": mod.slot,
+                "config_rev": decoded["config_rev"],
+                "subscriptions": decoded["subscriptions"],
+            }))
+            asyncio.create_task(_emit_sim_logger_status(mod.uid))
+            print(f"  [sim] logger config {mod.uid} "
+                  f"rev={decoded['config_rev']} subs={len(decoded['subscriptions'])}")
+            asyncio.create_task(_ack(f"L CONFIG {mod.uid} rev={decoded['config_rev']}"))
         elif line.startswith("$Q,") or line == "$Q":
             # $Q,TOPO / $Q,STATUS / $Q,DISCOVER — sim has no real registry
             # to replay, but TOPO matters for frontend reconciliation
@@ -1956,19 +2378,28 @@ async def _emit_sim_topology():
     sim_module, then query_done. Lets the frontend reconcile its
     _children + module.face from the sim's authoritative state."""
     for slot, mod in sorted(sim_modules.items()):
-        if slot in sim_parents:
+        if mod.remote:
+            await broadcast({
+                "type": "topology", "uid": mod.uid, "slot": slot,
+                "parent_uid": None, "parent_is_hub": False,
+                "parent_remote": True,
+                "parent_face": 0,
+            })
+        elif slot in sim_parents:
             parent_slot, parent_face = sim_parents[slot]
             parent = sim_modules.get(parent_slot)
             parent_uid = parent.uid if parent else None
             await broadcast({
                 "type": "topology", "uid": mod.uid, "slot": slot,
                 "parent_uid": parent_uid, "parent_is_hub": False,
+                "parent_remote": False,
                 "parent_face": parent_face,
             })
         else:
             await broadcast({
                 "type": "topology", "uid": mod.uid, "slot": slot,
                 "parent_uid": None, "parent_is_hub": True,
+                "parent_remote": False,
                 "parent_face": mod.face,
             })
     _consume_tracked_query_done("TOPO")
@@ -1981,6 +2412,148 @@ async def _emit_sim_query_done(cmd: str):
     _consume_tracked_query_done(command)
     await broadcast({"type": "query_done", "command": command})
     print(f"  [sim] $Q,{cmd} → DONE (no replay)")
+
+
+def _sim_active_link_for_mode(mode: str) -> str:
+    if mode == "wifi_only" or mode == "wifi_primary_can_fallback":
+        return "wifi"
+    if mode == "dual_send_debug":
+        return "dual"
+    return "can"
+
+
+async def _emit_sim_link_state(uid: str):
+    slot = slot_by_uid.get(uid)
+    mod = sim_modules.get(slot) if slot is not None else None
+    if not mod:
+        return
+    mode = sim_transport_modes.get(uid, SIM_DEFAULT_TRANSPORT_MODE)
+    active_link = _sim_active_link_for_mode(mode)
+    if mod.remote and active_link == "can":
+        active_link = "wifi"
+    ip = f"192.168.4.{100 + mod.slot}" if active_link in ("wifi", "dual") else ""
+    await broadcast({
+        "type": "link_state",
+        "uid": uid,
+        "slot": mod.slot,
+        "active_link": active_link,
+        "transport_mode": mode,
+        "topology_state": "remote_unplaced" if mod.remote else "physical",
+        "ip": ip,
+        "port": SIM_WIFI_PORT if ip else 0,
+    })
+
+
+def _sim_logger_status_for(uid: str) -> dict:
+    stats = sim_logger_status.setdefault(uid, {
+        "queue_depth": 0,
+        "dropped_count": 0,
+        "last_ack_ms": 0,
+        "rssi": -91.0,
+        "snr": 7.5,
+        "time_quality": 1,
+        "config_rev": 0,
+        "last_emit": {},
+        "last_value": {},
+    })
+    return stats
+
+
+async def _emit_sim_logger_status(uid: str):
+    slot = slot_by_uid.get(uid)
+    stats = _sim_logger_status_for(uid)
+    await broadcast({
+        "type": "logger_status",
+        "uid": uid,
+        "slot": slot,
+        "queue_depth": int(stats.get("queue_depth", 0)),
+        "dropped_count": int(stats.get("dropped_count", 0)),
+        "last_ack_ms": int(stats.get("last_ack_ms", 0)),
+        "rssi": float(stats.get("rssi", -91.0)),
+        "snr": float(stats.get("snr", 7.5)),
+        "time_quality": int(stats.get("time_quality", 1)),
+        "config_rev": int(stats.get("config_rev", 0)),
+    })
+
+
+async def _emit_sim_logger_info():
+    count = 0
+    for mod in sorted(sim_modules.values(), key=lambda m: m.slot):
+        if _module_is_logger_uid(mod.uid):
+            count += 1
+            await _emit_sim_logger_status(mod.uid)
+    print(f"  [sim] $L,INFO replied: {count} logger row(s)")
+
+
+def _sim_logger_should_queue(logger_uid: str, sub: dict, value: float,
+                             now_ms: int) -> bool:
+    stats = _sim_logger_status_for(logger_uid)
+    key = (sub["source_uid"], int(sub["channel_id"]), sub["record_type"])
+    last_emit = stats.setdefault("last_emit", {})
+    last_value = stats.setdefault("last_value", {})
+    elapsed = now_ms - int(last_emit.get(key, 0))
+    min_interval = int(sub.get("min_interval_ms", 0))
+    mode = sub.get("mode", "latest_interval")
+    if mode == "event_only":
+        return True
+    if mode == "on_change":
+        if key not in last_value:
+            return True
+        threshold = float(sub.get("threshold", 0.0))
+        if abs(value - float(last_value[key])) < threshold:
+            return False
+        return min_interval == 0 or elapsed >= min_interval
+    return min_interval == 0 or elapsed >= min_interval
+
+
+async def _sim_logger_consume_sensor(source_uid: str, channel_id: int,
+                                     value: float, now_ms: int):
+    source_uid = str(source_uid or "").upper()
+    for logger_uid, profile in list(sim_logger_profiles.items()):
+        stats = _sim_logger_status_for(logger_uid)
+        queued = False
+        for sub in profile.get("subscriptions", []):
+            if sub.get("record_type", "sensor") != "sensor":
+                continue
+            if sub.get("source_uid") != source_uid:
+                continue
+            if int(sub.get("channel_id", -1)) != int(channel_id):
+                continue
+            if not _sim_logger_should_queue(logger_uid, sub, value, now_ms):
+                continue
+            key = (sub["source_uid"], int(sub["channel_id"]), sub["record_type"])
+            stats["queue_depth"] = int(stats.get("queue_depth", 0)) + 1
+            stats.setdefault("last_emit", {})[key] = now_ms
+            stats.setdefault("last_value", {})[key] = float(value)
+            queued = True
+        if queued:
+            await _emit_sim_logger_status(logger_uid)
+
+
+async def _sim_logger_ack_tick(now_ms: int):
+    for uid, stats in list(sim_logger_status.items()):
+        if int(stats.get("queue_depth", 0)) <= 0:
+            continue
+        last_ack = int(stats.get("last_ack_ms", 0))
+        if last_ack and now_ms - last_ack < 1000:
+            continue
+        stats["queue_depth"] = 0
+        stats["last_ack_ms"] = now_ms
+        await _emit_sim_logger_status(uid)
+
+
+async def _emit_sim_wireless_info():
+    await broadcast({
+        "type": "wifi_ap",
+        "ssid": SIM_WIFI_SSID,
+        "ip": SIM_WIFI_IP,
+        "port": SIM_WIFI_PORT,
+    })
+    await broadcast({"type": "wifi_pass", "password": SIM_WIFI_PASSWORD})
+    await broadcast({"type": "wifi_token", "token": SIM_WIFI_TOKEN})
+    for mod in sorted(sim_modules.values(), key=lambda m: m.slot):
+        await _emit_sim_link_state(mod.uid)
+    print(f"  [sim] $W,INFO replied: {len(sim_modules)} link rows")
 
 
 async def _emit_sim_eca_snapshot():
@@ -2021,12 +2594,18 @@ async def sim_add_module(mod_type: str):
         return
     mod = SimModule(mod_type)
     sim_modules[slot] = mod
+    sim_transport_modes[mod.uid] = "wifi_only" if mod.remote else SIM_DEFAULT_TRANSPORT_MODE
     modules[slot] = mod.mod_id
     await mod.send_hello()
     await asyncio.sleep(0.1)
     await mod.send_descriptor()
+    await _emit_sim_link_state(mod.uid)
+    if _module_is_logger_uid(mod.uid):
+        _sim_logger_status_for(mod.uid)
+        await _emit_sim_logger_status(mod.uid)
     hz_str = f"{mod.hz} Hz" if mod.hz > 0 else "actuator (no streaming)"
-    print(f"  [sim] + {mod_type} connected → slot {slot}, face {mod.face}, {hz_str}")
+    loc = "remote" if mod.remote else f"face {mod.face}"
+    print(f"  [sim] + {mod_type} connected → slot {slot}, {loc}, {hz_str}")
 
 
 async def sim_remove_module(slot: int):
@@ -2050,7 +2629,13 @@ async def sim_remove_module(slot: int):
     modules_by_uid.pop(mod.uid, None)
     module_types_by_uid.pop(mod.uid, None)
     msg_cache_by_uid.pop(mod.uid, None)
+    link_cache_by_uid.pop(mod.uid, None)
     actuator_cache_by_uid.pop(mod.uid, None)
+    logger_status_by_uid.pop(mod.uid, None)
+    logger_config_by_uid.pop(mod.uid, None)
+    sim_transport_modes.pop(mod.uid, None)
+    sim_logger_profiles.pop(mod.uid, None)
+    sim_logger_status.pop(mod.uid, None)
     # Send goodbye via status update + explicit $U-style unplug so the
     # frontend drops the module from its state.
     await broadcast({"type": "unplug", "uid": mod.uid, "slot": slot})
@@ -2070,6 +2655,8 @@ def sim_print_status():
         if slot in sim_parents:
             ps, pf = sim_parents[slot]
             stack_str = f"  ⬆ on slot {ps} F{pf}"
+        if mod.remote:
+            stack_str = "  remote"
         print(f"    slot {slot}: {mod.mod_id} ({mod.mod_type}) "
               f"face={mod.face} {hz_str}{stack_str}")
 
@@ -2079,7 +2666,7 @@ def sim_print_help():
     print("  ╔══════════════════════════════════════════════╗")
     print("  ║  WearBlocks Simulator Commands               ║")
     print("  ╠══════════════════════════════════════════════╣")
-    print("  ║  +imu  +hr  +temp  +led  +vib  +motor       ║")
+    print("  ║  +imu +hr +temp +led +vib +motor +loralog  ║")
     print("  ║     Connect a module                         ║")
     print("  ║  -1  -2  -3  -4  -5                         ║")
     print("  ║     Disconnect module by slot number         ║")
@@ -2089,7 +2676,7 @@ def sim_print_help():
     print("  ║     Remove stack link                        ║")
     print("  ║  spike imu ax 0.8 [dur_ms]                   ║")
     print("  ║     Inject a one-shot sensor spike (ECA test)║")
-    print("  ║  demo    IMU+HR+Temp+LED+Vib, HR on IMU F4  ║")
+    print("  ║  demo    modules + remotes + LoRa logger    ║")
     print("  ║  clear   Disconnect all modules              ║")
     print("  ║  status  Show active modules + stacks        ║")
     print("  ║  help    Show this help                      ║")
@@ -2109,8 +2696,8 @@ async def sim_stdin_reader(cmd_queue: asyncio.Queue):
 
 
 async def sim_run_demo():
-    """Load real hardware modules and stack light on IMU face 4."""
-    for mt in ["imu", "light", "led", "vib", "audio"]:
+    """Load physical modules plus two remote Wi-Fi modules."""
+    for mt in ["imu", "light", "led", "vib", "audio", "remote_temp", "remote_hr", "loralog"]:
         await sim_add_module(mt)
         await asyncio.sleep(0.3)
     imu_slot = _slot_for_type("imu")
@@ -2118,7 +2705,7 @@ async def sim_run_demo():
     if imu_slot is not None and light_slot is not None:
         await asyncio.sleep(0.2)
         await sim_stack(light_slot, imu_slot, parent_face=4)
-    print("  [sim] demo: 5 real hardware modules, light stacked on IMU F4")
+    print("  [sim] demo: 5 CAN modules + 2 remote Wi-Fi modules + LoRa logger, light stacked on IMU F4")
 
 
 async def sim_clear_all():
@@ -2259,7 +2846,7 @@ async def sim_command_handler(cmd_queue: asyncio.Queue):
                     print(f"  [sim] spike: bad duration: {tokens[4]}")
                     continue
             ch_id = int(ch_map[ch_name])
-            until = int(time.time() * 1000) + duration_ms
+            until = _sim_monotonic_ms() + duration_ms
             mod.spikes[ch_id] = (value, until)
             print(f"  [sim] ⚡ spike slot={slot} {ch_name}={value} for {duration_ms}ms")
         elif cmd == "clear":
@@ -2286,8 +2873,8 @@ async def sim_data_loop():
     last_broadcast: dict[int, dict] = {}  # slot → last actuator snapshot we sent
 
     while True:
-        now = time.time()
-        now_ms = int(now * 1000)
+        now = time.monotonic()
+        now_ms = _sim_monotonic_ms()
 
         # 1. Emit sensor frames at each module's native rate.
         for slot, mod in list(sim_modules.items()):
@@ -2305,15 +2892,28 @@ async def sim_data_loop():
         # 3. Auto-expire actuator state and broadcast diffs.
         for slot, mod in list(sim_modules.items()):
             expire_actuator_state(mod, now_ms)
-            snapshot = {"led": dict(mod.led), "vib": dict(mod.vib),
-                        "motors": {str(k): dict(v) for k, v in mod.motors.items()}}
+            snapshot = {
+                "led": {k: v for k, v in mod.led.items() if not k.startswith("_")},
+                "vib": {k: v for k, v in mod.vib.items() if not k.startswith("_")},
+                "audio": {k: v for k, v in mod.audio.items() if not k.startswith("_")},
+                "motors": {
+                    str(index): {
+                        k: v for k, v in state.items() if not k.startswith("_")
+                    }
+                    for index, state in mod.motors.items()
+                },
+            }
             if last_broadcast.get(slot) != snapshot:
                 last_broadcast[slot] = snapshot
                 await broadcast({"type": "actuator_state",
                                  "uid": mod.uid, "slot": slot,
                                  "led": snapshot["led"],
                                  "vib": snapshot["vib"],
+                                 "audio": snapshot["audio"],
                                  "motors": snapshot["motors"]})
+
+        # 4. Simulated LoRa base station ACKs queued logger batches.
+        await _sim_logger_ack_tick(now_ms)
 
         await asyncio.sleep(0.005)  # 200 Hz tick resolution
 
@@ -2327,7 +2927,7 @@ async def sim_loop(auto_demo: bool = False):
     print("  ║  Multi-module, hot-plug, realistic data      ║")
     print("  ║                                              ║")
     print("  ║  Quick start:                                ��")
-    print("  ║    demo     → 5 modules, HR stacked on IMU   ║")
+    print("  ║    demo     → 5 CAN + 2 remote Wi-Fi modules ║")
     print("  ║    +imu     → connect just an IMU            ║")
     print("  ║    +motor   → connect the dual motor module  ║")
     print("  ║    stack hr on imu F4                        ║")
@@ -2335,7 +2935,7 @@ async def sim_loop(auto_demo: bool = False):
     print("  ╚══════════════════════════════════════════════╝")
     print()
     if auto_demo:
-        print("  [sim] --sim-demo: auto-loading demo (HR on IMU F4)...")
+        print("  [sim] --sim-demo: auto-loading mixed CAN/Wi-Fi demo...")
     else:
         print("  [sim] ready. type a command (or 'demo' to start):")
     print()

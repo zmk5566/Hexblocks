@@ -14,7 +14,7 @@ import struct
 import pytest
 
 from wb_eca import (
-    Act, CH, CondOp, ECAEngine, Logic, REF, VCOp,
+    Act, ActionMode, CH, CondOp, ECAEngine, Logic, REF, VCOp,
     MAGIC_0, MAGIC_1,
 )
 
@@ -39,10 +39,20 @@ def _f32(v: float) -> bytes:
     return struct.pack("<f", v)
 
 
+class _EncodedCondition:
+    def __init__(self, raw: bytes, hold_ms: int, cooldown_ms: int):
+        self.raw = raw
+        self.hold_ms = hold_ms
+        self.cooldown_ms = cooldown_ms
+
+
 def _enc_cond(*, ref_type=REF.SLOT, id=0, ch=0, op=CondOp.GT,
-              threshold=0.0, hold_ms=0, cooldown_ms=0) -> bytes:
-    return (_u8(ref_type) + _u32(id) + _u8(ch) + _u8(op)
-            + _f32(threshold) + _u16(hold_ms) + _u16(cooldown_ms))
+              threshold=0.0, hold_ms=0, cooldown_ms=0) -> _EncodedCondition:
+    # v4 stores timing once in the rule header. Keeping the timing arguments
+    # here makes the tests concise and mirrors the frontend's v3 migration.
+    raw = (_u8(ref_type) + _u32(id) + _u8(ch) + _u8(op)
+           + _f32(threshold))
+    return _EncodedCondition(raw, hold_ms, cooldown_ms)
 
 
 def _enc_action_param(*, type=REF.CONST, id=0, ch=0, value=0.0) -> bytes:
@@ -50,10 +60,14 @@ def _enc_action_param(*, type=REF.CONST, id=0, ch=0, value=0.0) -> bytes:
 
 
 def _enc_action(*, target=0, cmd=Act.LED_OFF,
-                params: list[bytes] | None = None) -> bytes:
-    """v3 action: variable length [target:4][cmd:1][numParams:1][param×N (10B each)]."""
+                params: list[bytes] | None = None,
+                mode=ActionMode.TRIGGER, delay_ms=0, duration_ms=0,
+                update_interval_ms=50) -> bytes:
+    """v4 action header plus typed params."""
     params = params or []
-    out = _u32(target) + _u8(cmd) + _u8(len(params))
+    out = (_u32(target) + _u8(cmd) + _u8(mode) + _u8(len(params))
+           + _u32(delay_ms) + _u32(duration_ms)
+           + _u16(update_interval_ms))
     for p in params:
         out += p
     return out
@@ -74,8 +88,8 @@ def _enc_vc(*, vc_id=0, op=VCOp.ADD, a_type=REF.SLOT, a_id=0, a_ch=0,
 
 def _build_program(*, variables: list[float] | None = None,
                    vcs: list[bytes] | None = None,
-                   rules: list[tuple[int, list[bytes], list[bytes]]] | None = None,
-                   version: int = 3) -> bytes:
+                   rules: list[tuple[int, list[_EncodedCondition], list[bytes]]] | None = None,
+                   version: int = 4) -> bytes:
     """Compose a full bytecode buffer the way eca-encoder.js does it."""
     variables = variables or []
     vcs = vcs or []
@@ -91,8 +105,10 @@ def _build_program(*, variables: list[float] | None = None,
     body += _u8(len(rules))
     for logic, conds, acts in rules:
         body += _u8(len(conds)) + _u8(logic) + _u8(len(acts))
+        body += _u32(max((c.hold_ms for c in conds), default=0))
+        body += _u32(max((c.cooldown_ms for c in conds), default=0))
         for c in conds:
-            body += c
+            body += c.raw
         for a in acts:
             body += a
 
@@ -139,6 +155,36 @@ def test_load_rejects_bad_checksum():
     prog[-1] ^= 0xFF
     eca = ECAEngine()
     assert eca.load_program(bytes(prog)) is False
+
+
+def test_load_rejects_truncated_variable_payload():
+    body = bytes([MAGIC_0, MAGIC_1, 4, 1, 0x00, 0x00])
+    prog = body + bytes([sum(body) & 0xFF])
+    assert ECAEngine().load_program(prog) is False
+
+
+def test_load_rejects_more_than_four_action_params():
+    cond = _enc_cond(ref_type=REF.CONST, op=CondOp.EQ, threshold=0)
+    act = _enc_action(target=LED_UID, cmd=Act.LED_SOLID,
+                      params=_const_params(1, 2, 3, 4, 5))
+    prog = _build_program(rules=[(Logic.AND, [cond], [act])])
+    assert ECAEngine().load_program(prog) is False
+
+
+def test_load_rejects_unsafe_stream_interval():
+    cond = _enc_cond(ref_type=REF.CONST, op=CondOp.EQ, threshold=0)
+    act = _enc_action(target=LED_UID, cmd=Act.LED_SOLID,
+                      mode=ActionMode.STREAM, update_interval_ms=1000,
+                      params=_const_params(1, 2, 3))
+    prog = _build_program(rules=[(Logic.AND, [cond], [act])])
+    assert ECAEngine().load_program(prog) is False
+
+
+def test_load_rejects_trailing_payload_bytes():
+    valid = _build_program()
+    body = valid[:-1] + b"\x00"
+    prog = body + bytes([sum(body) & 0xFF])
+    assert ECAEngine().load_program(prog) is False
 
 
 def test_simple_rule_fires_when_condition_met():
@@ -222,6 +268,7 @@ def test_live_ref_action_can_refresh_after_cooldown():
     cond = _enc_cond(id=SENSOR_UID, ch=CH.AX, op=CondOp.GT, threshold=0.5,
                      cooldown_ms=200)
     act = _enc_action(target=LED_UID, cmd=Act.LED_SOLID,
+                      mode=ActionMode.STREAM, update_interval_ms=200,
                       params=[
                           _enc_action_param(type=REF.SLOT, id=SENSOR_UID, ch=CH.AX),
                           *_const_params(0, 0),
@@ -243,6 +290,108 @@ def test_live_ref_action_can_refresh_after_cooldown():
     assert fired[-1].vals[0] == pytest.approx(0.9, abs=1e-6)
 
 
+def test_trigger_delay_survives_transient_event_consumption():
+    """A transient event schedules work once; delay is not sustained hold."""
+    cond = _enc_cond(id=SENSOR_UID, ch=CH.SHAKE, op=CondOp.GT,
+                     threshold=0.5)
+    act = _enc_action(target=LED_UID, cmd=Act.LED_SOLID,
+                      delay_ms=300, params=_const_params(255, 0, 0))
+    prog = _build_program(rules=[(Logic.AND, [cond], [act])])
+
+    fired: list = []
+    eca = ECAEngine(on_action=lambda a: fired.append((a.cmd, a.target)))
+    _bind_default_resolver(eca)
+    eca.load_program(prog); eca.run_program()
+
+    eca.update_sensor(1, CH.SHAKE, 1.0)
+    eca.tick(now_ms=100)
+    eca.tick(now_ms=399)
+    assert fired == []
+    eca.tick(now_ms=400)
+    assert fired == [(Act.LED_SOLID, LED_UID)]
+
+
+def test_duration_schedules_safe_stop():
+    cond = _enc_cond(id=SENSOR_UID, ch=CH.AX, op=CondOp.GT, threshold=0.5)
+    act = _enc_action(target=LED_UID, cmd=Act.LED_SOLID,
+                      duration_ms=200, params=_const_params(255, 0, 0))
+    prog = _build_program(rules=[(Logic.AND, [cond], [act])])
+
+    fired: list = []
+    eca = ECAEngine(on_action=lambda a: fired.append(a.cmd))
+    _bind_default_resolver(eca)
+    eca.load_program(prog); eca.run_program()
+    eca.update_sensor(1, CH.AX, 0.8)
+
+    eca.tick(now_ms=100)
+    eca.tick(now_ms=299)
+    assert fired == [Act.LED_SOLID]
+    eca.tick(now_ms=300)
+    assert fired == [Act.LED_SOLID, Act.LED_OFF]
+
+
+def test_while_true_stops_when_condition_falls():
+    cond = _enc_cond(id=SENSOR_UID, ch=CH.AX, op=CondOp.GT, threshold=0.5)
+    act = _enc_action(target=LED_UID, cmd=Act.LED_SOLID,
+                      mode=ActionMode.WHILE_TRUE,
+                      params=_const_params(10, 20, 30))
+    prog = _build_program(rules=[(Logic.AND, [cond], [act])])
+
+    fired: list = []
+    eca = ECAEngine(on_action=lambda a: fired.append(a.cmd))
+    _bind_default_resolver(eca)
+    eca.load_program(prog); eca.run_program()
+    eca.update_sensor(1, CH.AX, 0.8); eca.tick(now_ms=100)
+    eca.update_sensor(1, CH.AX, 0.2); eca.tick(now_ms=110)
+    assert fired == [Act.LED_SOLID, Act.LED_OFF]
+
+
+def test_old_duration_cannot_stop_newer_owner():
+    """A stale scheduled stop must not turn off a newer action on the target."""
+    c1 = _enc_cond(id=SENSOR_UID, ch=CH.AX, op=CondOp.GT, threshold=0.5)
+    c2 = _enc_cond(id=SENSOR_UID, ch=CH.AY, op=CondOp.GT, threshold=0.5)
+    old = _enc_action(target=LED_UID, cmd=Act.LED_SOLID, duration_ms=200,
+                      params=_const_params(255, 0, 0))
+    new = _enc_action(target=LED_UID, cmd=Act.LED_SOLID,
+                      params=_const_params(0, 255, 0))
+    prog = _build_program(rules=[
+        (Logic.AND, [c1], [old]),
+        (Logic.AND, [c2], [new]),
+    ])
+
+    fired: list = []
+    eca = ECAEngine(on_action=lambda a: fired.append(a.cmd))
+    _bind_default_resolver(eca)
+    eca.load_program(prog); eca.run_program()
+    eca.update_sensor(1, CH.AX, 0.8); eca.tick(now_ms=100)
+    eca.update_sensor(1, CH.AY, 0.8); eca.tick(now_ms=200)
+    eca.tick(now_ms=300)
+    assert fired == [Act.LED_SOLID, Act.LED_SOLID]
+
+
+def test_stop_program_safes_active_outputs_and_resets_timing():
+    cond = _enc_cond(id=SENSOR_UID, ch=CH.AX, op=CondOp.GT,
+                     threshold=0.5, hold_ms=70_000)
+    act = _enc_action(target=LED_UID, cmd=Act.LED_SOLID,
+                      params=_const_params(255, 0, 0))
+    prog = _build_program(rules=[(Logic.AND, [cond], [act])])
+
+    fired: list = []
+    eca = ECAEngine(on_action=lambda a: fired.append(a.cmd))
+    _bind_default_resolver(eca)
+    eca.load_program(prog); eca.run_program()
+    eca.update_sensor(1, CH.AX, 0.8)
+    eca.tick(now_ms=100)
+    eca.tick(now_ms=70_100)
+    assert fired == [Act.LED_SOLID]
+    eca.stop_program()
+    assert fired == [Act.LED_SOLID, Act.LED_OFF]
+
+    eca.run_program()
+    eca.tick(now_ms=80_000)
+    assert fired == [Act.LED_SOLID, Act.LED_OFF]
+
+
 def test_transient_event_channel_does_not_latch_true():
     """SHAKE/STEP/FREEFALL-style channels are consumed after one engine tick."""
     cond = _enc_cond(id=SENSOR_UID, ch=CH.SHAKE, op=CondOp.GT, threshold=0.5,
@@ -261,6 +410,15 @@ def test_transient_event_channel_does_not_latch_true():
     eca.tick(now_ms=131)
     eca.tick(now_ms=162)
     assert len(fired) == 1
+
+
+def test_transient_event_channel_rejects_hold_time():
+    cond = _enc_cond(id=SENSOR_UID, ch=CH.SHAKE, op=CondOp.GT,
+                     threshold=0.5, hold_ms=100)
+    act = _enc_action(target=LED_UID, cmd=Act.LED_SOLID,
+                      params=_const_params(255, 0, 0))
+    prog = _build_program(rules=[(Logic.AND, [cond], [act])])
+    assert ECAEngine().load_program(prog) is False
 
 
 def test_hold_ms_requires_sustained_truth():

@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <WearBlocksDescriptor.h>
 #include <WearBlocksProtocol.h>
+#include <WearBlocksWireless.h>
 
 #define WB_MAX_MODULES 12
 #define WB_NUM_FACES 6
@@ -28,6 +29,13 @@ struct RegisteredModule {
     uint32_t lastSeenMs;
     uint32_t detachedAtMs;
     uint8_t  pendingRetries;  // PENDING-state descriptor request retries
+    WBTransportMode transportMode;
+    WBActiveLink    activeLink;
+    WBTopologyState topologyState;
+    uint32_t canLastSeenMs;
+    uint32_t wifiLastSeenMs;
+    uint32_t wifiIp;          // IPv4 address in network byte order
+    uint16_t wifiPort;        // UDP source port for OSC replies/actions
 };
 
 class ModuleRegistry {
@@ -60,12 +68,19 @@ public:
     // Mutations.
     void addPending(uint32_t uid, uint8_t slot, uint16_t fwHash,
                     uint8_t parentSlot, uint8_t parentFace);
+    void addRemotePending(uint32_t uid, uint8_t slot, uint16_t fwHash,
+                          WBTransportMode mode);
     void markDescriptorPending(uint8_t slot, uint16_t fwHash);
     bool registerDescriptor(uint8_t slot, const WearBlocksDescriptor& desc);
     bool rebind(uint8_t slot, uint8_t newParentSlot, uint8_t newParentFace);
     void markDetached(uint8_t slot, uint32_t now);
     void markReattached(uint8_t slot, uint32_t now);
     void removeModule(uint8_t slot);
+    bool setTransportMode(uint8_t slot, WBTransportMode mode);
+    bool setActiveLink(uint8_t slot, WBActiveLink link);
+    bool noteLinkSeen(uint8_t slot, WBActiveLink link, uint32_t now);
+    bool setWirelessEndpoint(uint8_t slot, uint32_t ip, uint16_t port);
+    bool markRemoteUnplaced(uint8_t slot);
 
     // Subtree-aware ops. markSubtreeDetached marks the given slot AND every
     // descendant DETACHED, leaf-first, calling onDetached(uid) for each

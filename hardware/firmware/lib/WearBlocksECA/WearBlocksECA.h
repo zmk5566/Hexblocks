@@ -5,12 +5,15 @@
  * WearBlocks ECA Engine
  * Event-Condition-Action rule engine for the Hub (ESP32-C3).
  *
- * Bytecode format (v3, variable length, sent via $P command):
- *   [magic:2=0x57,0x42][version:1=0x03][num_vars:1][var_inits:4f×n]
+ * Bytecode format (v4, variable length, sent via $P command):
+ *   [magic:2=0x57,0x42][version:1=0x04][num_vars:1][var_inits:4f×n]
  *   [num_vc:1][vc_defs:22B×n]
  *   [num_rules:1]
- *     per rule: [num_cond:1][logic:1][num_act:1][cond×n:15B each]
- *     per action: [target:4][cmd:1][numParams:1][param×N: 10B each]
+ *     per rule: [num_cond:1][logic:1][num_act:1][hold_ms:u32][cooldown_ms:u32]
+ *               [cond×n:11B each]
+ *     per action: [target:4][cmd:1][mode:1][numParams:1]
+ *                 [delay_ms:u32][duration_ms:u32][update_interval_ms:u16 BE]
+ *                 [param×N: 10B each]
  *       param = [type:1][id:4][ch:1][value:f32]
  *   [checksum:1]  (sum of all bytes, mod 256)
  *
@@ -20,14 +23,14 @@
  *   WB_REF_VC    0x02  — virtual channel (id = vc_id 0-7, low byte only)
  *   WB_REF_VAR   0x03  — variable (id = var_id 0-7, low byte only)
  *
- * v3 vs v2: refs are now keyed by **module UID** (4-byte stable id) rather
+ * v3 changed refs to **module UID** (4-byte stable id) rather
  * than the hub-internal slot (1 byte, runtime-assigned). The engine asks
  * the host (`setUidResolver`) to translate uid→slot at execute time. The
  * frontend never sees a slot number — it stores UIDs in saved workspaces,
  * which survive replug/restart. See hub.ino:hubUidToSlot for the wiring.
  *
- * v2 → v3 size deltas: condition 12B → 15B, vc 16B → 22B, action header
- * 3B → 6B (target u8 → u32), action param 7B → 10B.
+ * v4 moves timing to rule/action lifecycle fields. All timers are serviced
+ * cooperatively from tick(); no delay() or busy wait is used by the engine.
  */
 
 #include <Arduino.h>
@@ -128,6 +131,12 @@ enum WBCondOp : uint8_t {
 
 enum WBLogic : uint8_t { LOGIC_AND = 0, LOGIC_OR };
 
+enum WBActionMode : uint8_t {
+    ACTION_TRIGGER    = 0,
+    ACTION_WHILE_TRUE = 1,
+    ACTION_STREAM     = 2,
+};
+
 // ─────────────────────────────────────────────────────
 //  ACTUATOR COMMANDS
 // ─────────────────────────────────────────────────────
@@ -143,9 +152,9 @@ enum WBActCmd : uint8_t {
     ACT_LED_STOP    = 6,   // 0 params
 
     // Vibration Motor
-    ACT_VIBRATE       = 16,  // 2 params: intensity (0..100), dur_ms
-    ACT_VIBRATE_PULSE = 17,  // 4 params: intensity, on_10ms, off_10ms, count
-    ACT_VIBRATE_RAMP  = 18,  // 3 params: from_pct, to_pct, dur_100ms
+    ACT_VIBRATE       = 16,  // 1 param: intensity (0..100); duration is lifecycle metadata
+    ACT_VIBRATE_PULSE = 17,  // 4 params: intensity, on_ms, off_ms, count
+    ACT_VIBRATE_RAMP  = 18,  // 2 params: from_pct, to_pct; duration is lifecycle metadata
     ACT_VIBRATE_STOP  = 19,  // 0 params
 
     // Variable operations (no CAN, Hub-internal only)
@@ -155,7 +164,7 @@ enum WBActCmd : uint8_t {
     ACT_VAR_TOGGLE = 35,  // 0 params: var = 1.0 - var
 
     // Audio Synth (MAX98357A I2S amp)
-    ACT_AUDIO_SET_TONE = 48,  // 3 params: freq_lo, freq_hi (uint16 LE Hz), amp (0..255)
+    ACT_AUDIO_SET_TONE = 48,  // 2 params: frequency Hz, amplitude 0..255
     ACT_AUDIO_STOP     = 49,  // 0 params
 
     // Dual DC motor (DRV8410)
@@ -174,9 +183,7 @@ struct __attribute__((packed)) WBCondition {
     uint8_t  channel_id;   // WBChannelID (only for ref_type=SLOT)
     uint8_t  op;           // WBCondOp
     float    threshold;    // comparison value
-    uint16_t hold_ms;      // must hold true this long before firing
-    uint16_t cooldown_ms;  // lockout after trigger
-};  // 15 bytes
+};  // 11 bytes
 
 struct __attribute__((packed)) WBVirtualChannel {
     uint8_t  vc_id;        // 0-7
@@ -191,10 +198,10 @@ struct __attribute__((packed)) WBVirtualChannel {
     float    c_const;      // float constant c (in_hi for MAP, max for CLAMP)
 };  // 22 bytes
 
-// Bytecode action params (v3): each parameter is a typed reference resolved
+// Bytecode action params: each parameter is a typed reference resolved
 // to a float at execute time. Per-cmd param schema lives in the executor
 // (WearBlocksECA.cpp): e.g. LED_SOLID expects 3 params [R, G, B] each 0..255,
-// VIBRATE expects [intensity_pct, dur_ms], VAR_SET/VAR_INC expect 1 value.
+// VAR_SET/VAR_INC expect one value. Timing lives in WBAction below.
 struct __attribute__((packed)) WBActionParam {
     uint8_t  type;         // WB_REF_SLOT / _CONST / _VC / _VAR
     uint32_t id;           // UID / vc_id / var_id (low byte for VC/VAR)
@@ -207,7 +214,11 @@ struct __attribute__((packed)) WBActionParam {
 struct __attribute__((packed)) WBAction {
     uint32_t       target;      // module UID (for actuator cmds) or var_id (for VAR_*, low byte only)
     uint8_t        cmd;         // WBActCmd
+    uint8_t        mode;        // WBActionMode
     uint8_t        numParams;   // 0..WB_ACTION_MAX_PARAMS
+    uint32_t       delay_ms;    // schedule start without blocking
+    uint32_t       duration_ms; // auto-stop after start; 0 means no engine timeout
+    uint16_t       update_interval_ms; // STREAM refresh interval
     WBActionParam  params[WB_ACTION_MAX_PARAMS];
 };
 
@@ -215,6 +226,8 @@ struct WBRule {
     uint8_t     num_cond;
     uint8_t     logic;      // WBLogic
     uint8_t     num_act;
+    uint32_t    hold_ms;
+    uint32_t    cooldown_ms;
     WBCondition conditions[4];
     WBAction    actions[4];
 };
@@ -226,18 +239,17 @@ struct WBRule {
 #define WB_ECA_MAX_RULES 16
 #define WB_ECA_MAX_VCS   8
 #define WB_ECA_MAX_VARS  8
-#define WB_ECA_MAX_SLOTS 7   // ECA register cap: slots 1-6 are addressable in
-                             // the runtime, index 0 unused. This is *separate*
-                             // from ModuleRegistry's broader slot range
-                             // (1..WB_MAX_MODULES, currently 11) used for
-                             // descriptor/topology bookkeeping; only the first
-                             // 6 registry slots are reachable from rule
-                             // bytecode. Bumping this widens the per-slot
-                             // cache arrays below and the bitmap in
-                             // autoEnableTopics; check both before changing.
+#define WB_ECA_MAX_SLOTS 12  // ECA cache cap: registry slots 1-11 are
+                             // addressable; index 0 is the unavailable
+                             // sentinel. This mirrors ModuleRegistry's
+                             // WB_MAX_MODULES without including hub headers.
+                             // Bumping this widens the per-slot cache arrays
+                             // and the bitmap in autoEnableTopics.
 #define WB_ECA_MAGIC_0   0x57
 #define WB_ECA_MAGIC_1   0x42
-#define WB_ECA_VERSION   0x03
+#define WB_ECA_VERSION   0x04
+#define WB_ECA_MAX_ACTIONS 4
+#define WB_ECA_MAX_OUTPUTS (WB_ECA_MAX_RULES * WB_ECA_MAX_ACTIONS)
 
 // Max bytecode size for NVS persistence. Comfortably under the ESP32
 // NVS Preferences blob limit (~4000 B). Bumping this requires confirming
@@ -258,10 +270,16 @@ public:
     // (b) target actuator commands at the correct CAN slot, and (c) enable
     // topics on the right module. Without it, all SLOT refs resolve to 0.
     typedef uint8_t (*UidToSlotFn)(uint32_t uid);
+    typedef bool (*ActuatorDispatchFn)(uint8_t slot, uint32_t uid, uint8_t cmd,
+                                       const uint8_t* params, uint8_t paramLen);
+    typedef bool (*TopicDispatchFn)(uint8_t slot, uint32_t uid, uint8_t channelId,
+                                    bool enable);
 
     WearBlocksECA();
     void begin(WearBlocksProtocol& proto);
     void setUidResolver(UidToSlotFn fn) { _uidToSlot = fn; }
+    void setActuatorDispatcher(ActuatorDispatchFn fn) { _actuatorDispatch = fn; }
+    void setTopicDispatcher(TopicDispatchFn fn) { _topicDispatch = fn; }
     void setLocalActuatorHandler(WBLocalActuatorCallback cb) {
         _localActuator = cb;
     }
@@ -320,18 +338,52 @@ public:
     float getSensorValue(uint8_t slot, uint8_t channelId) const;
 
 private:
+    struct WBActionRuntime {
+        bool     pending;
+        bool     active;
+        uint32_t dueAt;
+        uint32_t stopAt;
+        uint32_t nextUpdateAt;
+        uint32_t token;
+    };
+
+    struct WBOutputOwner {
+        bool     used;
+        uint32_t uid;
+        uint32_t token;
+        uint8_t  stopCmd;
+    };
+
     // Value resolution
     float resolveRef(uint8_t ref_type, uint32_t id, uint8_t channel_id);
     float computeVC(uint8_t vc_id);
     bool  evaluateConditions(const WBRule& rule, uint8_t rule_idx, uint32_t now);
-    void  executeAction(const WBAction& act);
-    bool  ruleNeedsContinuousUpdates(const WBRule& rule) const;
+    bool  executeAction(const WBAction& act);
+    bool  executeStop(uint32_t uid, uint8_t stopCmd);
+    void  resetTimingState();
+    void  safeAllOutputs();
+    void  startAction(uint8_t ruleIdx, uint8_t actionIdx, uint32_t now);
+    void  stopAction(uint8_t ruleIdx, uint8_t actionIdx, bool cancelPending = true);
+    void  serviceAction(uint8_t ruleIdx, uint8_t actionIdx,
+                        bool ruleTrue, uint32_t now);
+    uint32_t claimOutput(uint32_t uid, uint8_t stopCmd);
+    bool  ownsOutput(uint32_t uid, uint32_t token) const;
+    void  releaseOutput(uint32_t uid, uint32_t token);
+    static uint8_t stopCommandFor(uint8_t cmd);
+    static bool timeReached(uint32_t now, uint32_t deadline);
+    static bool isVariableCommand(uint8_t cmd);
+    static bool isStopCommand(uint8_t cmd);
+    bool  dispatchActuator(uint8_t slot, uint32_t uid, uint8_t cmd,
+                           const uint8_t* params, uint8_t paramLen);
+    bool  dispatchTopic(uint8_t slot, uint32_t uid, uint8_t channelId, bool enable);
     void  clearTransientEvents();
 
     UidToSlotFn _uidToSlot;
+    ActuatorDispatchFn _actuatorDispatch;
+    TopicDispatchFn _topicDispatch;
     WBLocalActuatorCallback _localActuator;
 
-    // Sensor cache: [slot 1-6][channel_id 0-47]
+    // Sensor cache: [slot 1-11][channel_id 0-47]
     float    _cache[WB_ECA_MAX_SLOTS][WB_CH_MAX];
     float    _prevCache[WB_ECA_MAX_SLOTS][WB_CH_MAX]; // for DIFF
     bool     _eventFresh[WB_ECA_MAX_SLOTS][WB_CH_MAX];
@@ -347,7 +399,10 @@ private:
     uint32_t _lastTrigger[WB_ECA_MAX_RULES];  // last trigger time (cooldown)
     bool     _condActive[WB_ECA_MAX_RULES];   // current condition state
     bool     _lastTriggerValid[WB_ECA_MAX_RULES];
-    bool     _ruleLatched[WB_ECA_MAX_RULES];  // edge-fire latch for constant actions
+    bool     _ruleLatched[WB_ECA_MAX_RULES];  // false→true episode latch
+    WBActionRuntime _actionRuntime[WB_ECA_MAX_RULES][WB_ECA_MAX_ACTIONS];
+    WBOutputOwner   _outputOwners[WB_ECA_MAX_OUTPUTS];
+    uint32_t        _nextOwnerToken;
 
     // Program storage
     WBVirtualChannel _vcs[WB_ECA_MAX_VCS];

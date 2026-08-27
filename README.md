@@ -34,12 +34,14 @@ The core design goal is semantic continuity: physical modules, authoring referen
 
 ```
 hardware/             ESP32-C3 firmware (hub + 7 module types) and PCB
-  firmware/hub/       hub.ino, ModuleRegistry — CAN master, BLE/USB companion link
+  firmware/hub/       hub.ino, ModuleRegistry — CAN master, BLE/USB link,
+                      Wi-Fi/OSC fallback host
   firmware/motor_hub/ one-face BLE/USB hub with a built-in dual-motor actuator
   firmware/module_*/  per-module sketches (imu, led, vibration, motor,
                       amplifier, light_resistor, resistor)
   firmware/lib/       shared C++ libraries: WearBlocksCAN, *Protocol,
-                      *Descriptor, *Module, *ECA (bytecode interpreter)
+                      *Descriptor, *Module, *ECA (bytecode interpreter),
+                      *Wireless (Wi-Fi/OSC transport helpers)
   pcb/                board files
 schematics/           KiCad project (board + schematic)
 openscad-model/       hex enclosure SCAD sources + exported STL
@@ -125,6 +127,20 @@ The hub evaluates rules locally. A companion computer is only needed to author o
 3. **Power up.** Snap modules onto the hub. The hub enumerates them over CAN, allocates slots, and (if a program is in NVS) starts evaluating immediately. No companion computer required.
 
 4. **Author or replace the program (optional).** Run the bridge (see Mode B), open the browser UI, write rules in the Blockly canvas or via the LLM panel, and click upload. The encoded bytecode is sent as `$P <base64>` over the active transport, persisted in NVS, and runs on every boot until cleared with `$PC` (clear) or `$PE` (erase NVS).
+
+### ECA v4 timing model
+
+ECA timing is cooperative: the Hub never sleeps or busy-waits while a rule is delayed. `hold_ms` and `cooldown_ms` belong to the rule; each action independently has `delay_ms`, `duration_ms`, and one of three modes:
+
+- `TRIGGER`: starts once per rule episode. A delayed trigger remains scheduled after a one-tick event is consumed.
+- `WHILE_TRUE`: stays active only while the rule remains true.
+- `STREAM`: refreshes live sensor/VC/variable parameters at `update_interval_ms` (minimum 20 ms).
+
+Transient event channels such as shake, free-fall, and HR spike must use rule `hold_ms = 0`; use action `delay_ms` when the response should happen later.
+
+LED, vibration, and audio outputs use ownership tokens so an older duration timer cannot stop a newer effect on the same module. Stop, clear, and program replacement emit a safe output-specific stop. The output modules also enforce duration locally; `STREAM` commands renew a short lease, so a lost Hub/CAN connection expires the output without waiting for a final STOP frame.
+
+ECA v4 is a wire-format change. Reflash the Hub plus `module_led`, `module_vibration`, and `module_amplifier`, then upload the workspace again; the Hub intentionally uses a new `prog_v4` NVS key rather than interpreting stored v3 bytes.
 
 ## Quickstart - Sensor Stream + Browser
 

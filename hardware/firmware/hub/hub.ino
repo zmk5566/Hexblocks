@@ -51,14 +51,22 @@
  *   $A <uidHex> <cmd> <p...>  actuator EXECUTE
  *   $TE <uidHex> <ch>      topic enable;  $TD <uidHex> <ch> disable
  *   $TA <uidHex>           topic enable all
+ *   $L,INFO                emit LoRa logger status rows
+ *   $L,CONFIG <uidHex> <base64Profile>
+ *                           send logger topic allowlist over SYS_CONFIG
  */
 
 #include <WearBlocksCAN.h>
 #include <WearBlocksProtocol.h>
 #include <WearBlocksDescriptor.h>
 #include <WearBlocksECA.h>
+#include <WearBlocksLogger.h>
+#include <WearBlocksWireless.h>
 #include <Preferences.h>
 #include <mbedtls/base64.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include <esp_system.h>
 #include "ModuleRegistry.h"
 
 // ── BLE peripheral ────────────────────────────────���───────────
@@ -355,6 +363,23 @@ static bool eraseTopoMemory() {
 uint32_t sampleCount = 0;
 uint32_t statsStart = 0;
 
+// ── Wi-Fi / OSC fallback ───────────────────────────────────────
+static WiFiUDP g_wifiUdp;
+static bool    g_wifiApRunning = false;
+static uint32_t g_wifiHubId = 0;
+static char    g_wifiSsid[WB_WIFI_MAX_SSID_LEN] = {0};
+static char    g_wifiPass[WB_WIFI_MAX_PASS_LEN] = {0};
+static char    g_wifiToken[WB_WIFI_MAX_TOKEN_LEN + 1] = {0};
+static uint8_t g_wifiRxBuf[1024];
+static uint8_t g_wifiTxBuf[768];
+static uint16_t g_wifiMsgId = 1;
+static uint32_t g_wifiLastSensorSeq[WB_MAX_MODULES][WB_CH_MAX] = {};
+static uint32_t g_wifiProvisionCrc[WB_MAX_MODULES] = {};
+static uint32_t g_wifiProvisionAtMs[WB_MAX_MODULES] = {};
+static uint32_t g_loggerConfigRev[WB_MAX_MODULES] = {};
+static uint8_t  g_loggerProvisionSession[WB_MAX_MODULES] = {};
+static const uint32_t WB_CAN_LINK_STALE_MS = 3000;
+
 // ── uid → hex helper ──────────────────────────────────────────
 static void formatUidHex(uint32_t uid, char* buf, size_t len) {
     snprintf(buf, len, "%08lX", (unsigned long)uid);
@@ -394,11 +419,220 @@ static void printParentLabel(Print& p, uint8_t parentSlot) {
     }
 }
 
+static void printParentLabelForModule(Print& p, const RegisteredModule* m) {
+    if (!m) return;
+    if (m->topologyState == WB_TOPO_REMOTE_UNPLACED) {
+        p.print("REMOTE");
+        return;
+    }
+    printParentLabel(p, m->parentSlot);
+}
+
 static void emitModuleIdentity(Print& p, const RegisteredModule* m) {
     if (!m) return;
     const char* moduleId = m->hasDescriptor ? m->descriptor.moduleId : "";
     const char* version  = m->hasDescriptor ? m->descriptor.version : "";
     p.printf("$I,%s,%s,%s,%04X\n", uidHex(m->uid), moduleId, version, m->fwHash);
+}
+
+static void emitWirelessState(Print& p, const RegisteredModule* m) {
+    if (!m) return;
+    char ipBuf[24] = "";
+    if (m->wifiIp != 0) {
+        IPAddress ip(m->wifiIp);
+        String s = ip.toString();
+        strlcpy(ipBuf, s.c_str(), sizeof(ipBuf));
+    }
+    p.printf("$W,%s,%s,%s,%s,%s,%u\n",
+             uidHex(m->uid),
+             wbActiveLinkName(m->activeLink),
+             wbTransportModeName(m->transportMode),
+             wbTopologyStateName(m->topologyState),
+             ipBuf,
+             (unsigned)m->wifiPort);
+}
+
+static void emitModuleHello(Print& p, const RegisteredModule* m) {
+    if (!m) return;
+    const char* mid = m->hasDescriptor ? m->descriptor.moduleId : "";
+    p.printf("$H,%s,%s,", uidHex(m->uid), mid);
+    printParentLabelForModule(p, m);
+    p.printf(",%d\n", m->parentFace);
+    emitWirelessState(p, m);
+}
+
+static bool moduleHasWifiEndpoint(const RegisteredModule* m) {
+    return m && m->wifiIp != 0 && m->wifiPort != 0;
+}
+
+static bool moduleIsLogger(const RegisteredModule* m) {
+    if (!m || !m->hasDescriptor) return false;
+    if (strcmp(m->descriptor.moduleId, "loralogv1") == 0) return true;
+    if (strcmp(m->descriptor.category, "wireless_uplink") == 0) return true;
+    for (uint8_t i = 0; i < m->descriptor.numCapabilities; i++) {
+        const WBCapability& cap = m->descriptor.capabilities[i];
+        if (strcmp(cap.type, "logger") == 0 ||
+            strcmp(cap.modality, "batch_log") == 0 ||
+            strcmp(cap.modality, "lora_uplink") == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool isTransportModeText(const char* mode) {
+    return mode &&
+           (strcmp(mode, "can_only") == 0 ||
+            strcmp(mode, "wifi_only") == 0 ||
+            strcmp(mode, "can_primary_wifi_fallback") == 0 ||
+            strcmp(mode, "wifi_primary_can_fallback") == 0 ||
+            strcmp(mode, "dual_send_debug") == 0);
+}
+
+static bool shouldAcceptCanSensor(const RegisteredModule* m) {
+    if (!m) return false;
+    switch (m->transportMode) {
+        case WB_TRANSPORT_WIFI_ONLY:
+            return false;
+        case WB_TRANSPORT_WIFI_PRIMARY_CAN_FALLBACK:
+            return m->activeLink != WB_LINK_WIFI;
+        default:
+            return true;
+    }
+}
+
+static bool shouldAcceptWifiSensor(const RegisteredModule* m) {
+    if (!m || !moduleHasWifiEndpoint(m)) return false;
+    switch (m->transportMode) {
+        case WB_TRANSPORT_CAN_ONLY:
+            return false;
+        case WB_TRANSPORT_CAN_PRIMARY_WIFI_FALLBACK:
+            return m->activeLink == WB_LINK_WIFI;
+        default:
+            return true;
+    }
+}
+
+static bool shouldRouteActionWifi(const RegisteredModule* m) {
+    if (!m || !moduleHasWifiEndpoint(m)) return false;
+    switch (m->transportMode) {
+        case WB_TRANSPORT_WIFI_ONLY:
+            return true;
+        case WB_TRANSPORT_WIFI_PRIMARY_CAN_FALLBACK:
+            return true;
+        case WB_TRANSPORT_CAN_PRIMARY_WIFI_FALLBACK:
+            return m->activeLink == WB_LINK_WIFI;
+        case WB_TRANSPORT_DUAL_SEND_DEBUG:
+            return true;
+        case WB_TRANSPORT_CAN_ONLY:
+        default:
+            return false;
+    }
+}
+
+static bool shouldRouteActionCan(const RegisteredModule* m) {
+    if (!m) return false;
+    switch (m->transportMode) {
+        case WB_TRANSPORT_WIFI_ONLY:
+            return false;
+        case WB_TRANSPORT_WIFI_PRIMARY_CAN_FALLBACK:
+            return !moduleHasWifiEndpoint(m);
+        default:
+            return true;
+    }
+}
+
+static void noteCanSeenForSlot(uint8_t slot, uint32_t now) {
+    registry.noteLinkSeen(slot, WB_LINK_CAN, now);
+    const RegisteredModule* m = registry.getModule(slot);
+    if (!m) return;
+    if (m->transportMode == WB_TRANSPORT_CAN_ONLY ||
+        m->transportMode == WB_TRANSPORT_CAN_PRIMARY_WIFI_FALLBACK ||
+        m->transportMode == WB_TRANSPORT_DUAL_SEND_DEBUG ||
+        (m->transportMode == WB_TRANSPORT_WIFI_PRIMARY_CAN_FALLBACK &&
+         !moduleHasWifiEndpoint(m))) {
+        registry.setActiveLink(slot, WB_LINK_CAN);
+    }
+}
+
+static void noteWifiSeenForSlot(uint8_t slot, uint32_t now) {
+    registry.noteLinkSeen(slot, WB_LINK_WIFI, now);
+    const RegisteredModule* m = registry.getModule(slot);
+    if (!m) return;
+    if (m->transportMode == WB_TRANSPORT_WIFI_ONLY ||
+        m->transportMode == WB_TRANSPORT_WIFI_PRIMARY_CAN_FALLBACK ||
+        m->transportMode == WB_TRANSPORT_DUAL_SEND_DEBUG ||
+        (m->transportMode == WB_TRANSPORT_CAN_PRIMARY_WIFI_FALLBACK &&
+         (m->activeLink != WB_LINK_CAN ||
+          m->state == MODULE_DETACHED ||
+          now - m->canLastSeenMs > WB_CAN_LINK_STALE_MS))) {
+        registry.setActiveLink(slot, WB_LINK_WIFI);
+    }
+}
+
+static bool buildWirelessProfileForSlot(uint8_t slot, WBWirelessConfig& cfg,
+                                        uint8_t* encoded, uint16_t encodedCap,
+                                        uint16_t& encodedLen) {
+    const RegisteredModule* m = registry.getModule(slot);
+    if (!m || !encoded) return false;
+    wbWirelessConfigDefaults(cfg);
+    cfg.mode = m->transportMode;
+    cfg.hubId = g_wifiHubId;
+    cfg.port = WB_WIFI_DEFAULT_PORT;
+    cfg.enabled = wbTransportAllowsWifi(cfg.mode) ? 1 : 0;
+    strlcpy(cfg.ssid, g_wifiSsid, sizeof(cfg.ssid));
+    strlcpy(cfg.pass, g_wifiPass, sizeof(cfg.pass));
+    strlcpy(cfg.token, g_wifiToken, sizeof(cfg.token));
+    return wbWirelessConfigEncode(cfg, encoded, encodedCap, encodedLen);
+}
+
+static bool provisionWirelessForSlot(uint8_t slot, bool force = false) {
+    if (slot == 0 || slot >= WB_MAX_MODULES) return false;
+    WBWirelessConfig cfg;
+    uint8_t encoded[WB_WIFI_PROFILE_MAX_ENCODED];
+    uint16_t encodedLen = 0;
+    if (!buildWirelessProfileForSlot(slot, cfg, encoded, sizeof(encoded), encodedLen)) {
+        return false;
+    }
+
+    uint32_t crc = wbFnv1a32(encoded, encodedLen);
+    uint32_t now = millis();
+    if (!force &&
+        g_wifiProvisionCrc[slot] == crc &&
+        now - g_wifiProvisionAtMs[slot] < 30000) {
+        return true;
+    }
+
+    uint8_t sessionId = (uint8_t)((crc ^ now) & 0xFF);
+    if (sessionId == 0) sessionId = 1;
+    bool ok = protocol.sendSysConfig(slot, encoded, encodedLen, sessionId);
+    if (ok) {
+        g_wifiProvisionCrc[slot] = crc;
+        g_wifiProvisionAtMs[slot] = now;
+    }
+    return ok;
+}
+
+static bool forwardLoggerRecord(uint32_t sourceUid, uint8_t channelId,
+                                uint8_t recordType, uint8_t flags,
+                                float value);
+void broadcastSlotUidMap();
+void emitLoggerInfo();
+
+void onSysConfigAck(uint8_t moduleSlot, uint8_t status, uint8_t sessionId) {
+    const RegisteredModule* m = registry.getModule(moduleSlot);
+    bool loggerAck = moduleSlot < WB_MAX_MODULES &&
+                     g_loggerProvisionSession[moduleSlot] == sessionId;
+    if (loggerAck) {
+        Serial.printf("[LORA-LOG] config ack slot=%u uid=%s status=%u session=%u rev=%lu\n",
+                      (unsigned)moduleSlot, m ? uidHex(m->uid) : "????????",
+                      (unsigned)status, (unsigned)sessionId,
+                      (unsigned long)g_loggerConfigRev[moduleSlot]);
+    } else {
+        Serial.printf("[WIFI] provision ack slot=%u uid=%s status=%u session=%u\n",
+                      (unsigned)moduleSlot, m ? uidHex(m->uid) : "????????",
+                      (unsigned)status, (unsigned)sessionId);
+    }
 }
 
 // ── PendingAttach ops ─────────────────────────────────────────
@@ -586,6 +820,7 @@ void onModuleHello(const HelloMessage& msg) {
                           uidHex(msg.uid), slot);
             return;
         }
+        noteCanSeenForSlot(slot, now);
 
         // REGISTERED: keepalive / pre-ACK retry. Re-ACK so the module
         // stops the retry loop; never touch parent binding or the attach
@@ -596,6 +831,7 @@ void onModuleHello(const HelloMessage& msg) {
         if (existing->state == MODULE_REGISTERED) {
             bool cached = (existing->fwHash == msg.fwHash) && existing->hasDescriptor;
             protocol.sendAck(slot, msg.uid, cached);
+            provisionWirelessForSlot(slot);
             if (!cached) {
                 registry.markDescriptorPending(slot, msg.fwHash);
                 protocol.requestDescriptor(slot);
@@ -610,6 +846,7 @@ void onModuleHello(const HelloMessage& msg) {
         // re-request descriptor. No rebind (binding came from addPending).
         if (existing->state == MODULE_PENDING) {
             protocol.sendAck(slot, msg.uid, /*cached=*/false);
+            provisionWirelessForSlot(slot);
             protocol.requestDescriptor(slot);
             return;
         }
@@ -654,6 +891,7 @@ void onModuleHello(const HelloMessage& msg) {
 
         bool cached = (existing->fwHash == msg.fwHash) && existing->hasDescriptor;
         protocol.sendAck(slot, msg.uid, cached);
+        provisionWirelessForSlot(slot);
         if (!cached) {
             registry.markDescriptorPending(slot, msg.fwHash);
             protocol.requestDescriptor(slot);
@@ -681,15 +919,15 @@ void onModuleHello(const HelloMessage& msg) {
             printParentLabel(out, oldParent); out.printf(",%d,", oldFace);
             printParentLabel(out, parentSlot); out.printf(",%d\n", parentFace);
             emitModuleIdentity(out, registry.getModule(slot));
+            emitWirelessState(out, registry.getModule(slot));
         } else {
             // Reattached at same place — emit fresh $H so frontend can
             // clear the "detached" flag.
             const RegisteredModule* m = registry.getModule(slot);
-            out.printf("$H,%s,%s,", uidHex(msg.uid),
-                          (m && m->hasDescriptor) ? m->descriptor.moduleId : "");
-            printParentLabel(out, parentSlot); out.printf(",%d\n", parentFace);
+            emitModuleHello(out, m);
             emitModuleIdentity(out, m);
         }
+        if (moduleIsLogger(registry.getModule(slot))) emitLoggerInfo();
         return;
     }
 
@@ -801,11 +1039,12 @@ void onModuleHello(const HelloMessage& msg) {
 
     if (!fromMemory) commitAttach(attachIdx);
     registry.addPending(msg.uid, newSlot, msg.fwHash, parentSlot, parentFace);
+    noteCanSeenForSlot(newSlot, now);
     protocol.sendAck(newSlot, msg.uid, /*descriptorCached=*/false);
+    provisionWirelessForSlot(newSlot);
     protocol.requestDescriptor(newSlot);
 
-    out.printf("$H,%s,,", uidHex(msg.uid));
-    printParentLabel(out, parentSlot); out.printf(",%d\n", parentFace);
+    emitModuleHello(out, registry.getModule(newSlot));
     emitModuleIdentity(out, registry.getModule(newSlot));
 }
 
@@ -818,6 +1057,7 @@ void onModuleDescriptor(uint8_t sourceSlot, const WearBlocksDescriptor& desc) {
     if (!m) return;
     out.printf("$D,%s,%s\n", uidHex(m->uid), desc.toJSON().c_str());
     emitModuleIdentity(out, m);
+    emitWirelessState(out, m);
 
     // Persist the binding so a future hub-only reboot can recover this
     // module's location without depending on FIFO attach ordering.
@@ -836,6 +1076,8 @@ void onModuleDescriptor(uint8_t sourceSlot, const WearBlocksDescriptor& desc) {
     // descriptor refresh; the cached-skip reattach path emits this from
     // onModuleHello() instead. No-op when no program is loaded.
     eca.autoEnableTopicsForUid(m->uid);
+    forwardLoggerRecord(m->uid, 0, WB_LOGGER_RECORD_TOPOLOGY_EVENT, 1, 1.0f);
+    if (moduleIsLogger(m)) emitLoggerInfo();
 }
 
 void onSensorData(uint32_t canId, uint8_t channelId,
@@ -851,6 +1093,8 @@ void onSensorData(uint32_t canId, uint8_t channelId,
     // module is physically gone — emitting $S for a detached UID would
     // tell the frontend the module is alive when it isn't.
     if (m->state != MODULE_REGISTERED) return;
+    if (!shouldAcceptCanSensor(m)) return;
+    noteCanSeenForSlot(slot, millis());
 
     eca.updateSensor(slot, channelId, payload, payloadLen);
 
@@ -976,9 +1220,7 @@ void emitStatusSnapshot() {
         const RegisteredModule* m = registry.getModule(i);
         if (!m) continue;                      // MODULE_EMPTY — skip
         if (m->state == MODULE_DETACHED) continue;
-        const char* mid = m->hasDescriptor ? m->descriptor.moduleId : "";
-        out.printf("$H,%s,%s,", uidHex(m->uid), mid);
-        printParentLabel(out, m->parentSlot); out.printf(",%d\n", m->parentFace);
+        emitModuleHello(out, m);
         emitModuleIdentity(out, m);
         if (m->hasDescriptor) {
             out.printf("$D,%s,%s\n", uidHex(m->uid),
@@ -994,7 +1236,8 @@ void emitTopology() {
         if (!m) continue;
         if (m->state == MODULE_DETACHED) continue;
         out.printf("$T,%s,", uidHex(m->uid));
-        printParentLabel(out, m->parentSlot); out.printf(",%d\n", m->parentFace);
+        printParentLabelForModule(out, m); out.printf(",%d\n", m->parentFace);
+        emitWirelessState(out, m);
     }
     out.println("$Q,DONE");
 }
@@ -1039,7 +1282,205 @@ void emitEcaSnapshot() {
     out.println("$Q,DONE");
 }
 
+void broadcastSlotUidMap() {
+    for (uint8_t s = 1; s < WB_MAX_MODULES; s++) {
+        const RegisteredModule* m = registry.getModule(s);
+        if (!m || m->state == MODULE_DETACHED || m->uid == 0) continue;
+        protocol.sendAck(s, m->uid, m->hasDescriptor);
+        delay(1);
+    }
+}
+
+void emitLoggerInfo() {
+    bool hasLogger = false;
+    for (uint8_t s = 1; s < WB_MAX_MODULES; s++) {
+        const RegisteredModule* m = registry.getModule(s);
+        if (moduleIsLogger(m) && m->state != MODULE_DETACHED) {
+            hasLogger = true;
+            break;
+        }
+    }
+    if (hasLogger) broadcastSlotUidMap();
+
+    for (uint8_t s = 1; s < WB_MAX_MODULES; s++) {
+        const RegisteredModule* m = registry.getModule(s);
+        if (!moduleIsLogger(m) || m->state == MODULE_DETACHED) continue;
+        out.printf("$L,%s,%u,%lu,%lu,%d,%d,%u,%lu\n",
+                   uidHex(m->uid),
+                   0,
+                   0UL,
+                   0UL,
+                   0,
+                   0,
+                   (unsigned)WB_LOGGER_TIME_HUB_SYNC,
+                   (unsigned long)g_loggerConfigRev[s]);
+    }
+}
+
+static bool provisionLoggerForSlot(uint8_t slot, const uint8_t* profileBytes,
+                                   uint16_t profileLen, uint32_t configRev) {
+    if (slot == 0 || slot >= WB_MAX_MODULES || !profileBytes || profileLen == 0) {
+        return false;
+    }
+    uint8_t sessionId = (uint8_t)((configRev ^ millis()) & 0xFF);
+    if (sessionId == 0) sessionId = 1;
+    bool ok = protocol.sendSysConfig(slot, profileBytes, profileLen, sessionId);
+    if (ok) {
+        g_loggerConfigRev[slot] = configRev;
+        g_loggerProvisionSession[slot] = sessionId;
+    }
+    return ok;
+}
+
+static bool forwardLoggerRecord(uint32_t sourceUid, uint8_t channelId,
+                                uint8_t recordType, uint8_t flags,
+                                float value) {
+    bool sent = false;
+    for (uint8_t s = 1; s < WB_MAX_MODULES; s++) {
+        const RegisteredModule* logger = registry.getModule(s);
+        if (!moduleIsLogger(logger) || logger->state != MODULE_REGISTERED) continue;
+        sent = protocol.sendLoggerRecord(s, sourceUid, channelId, recordType,
+                                         flags, value) || sent;
+    }
+    return sent;
+}
+
 bool handleEcaCommand(const char* cmd, size_t len);
+static bool dispatchActuatorForLink(uint8_t slot, uint32_t uid, uint8_t cmd,
+                                    const uint8_t* params, uint8_t paramLen);
+static bool dispatchTopicForLink(uint8_t slot, uint32_t uid, uint8_t channelId,
+                                 bool enable);
+bool handleLoggerHostCommand(const char* cmd);
+
+bool handleLoggerHostCommand(const char* cmd) {
+    if (strcmp(cmd, "$L,INFO") == 0) {
+        emitLoggerInfo();
+        return true;
+    }
+
+    if (strncmp(cmd, "$L,CONFIG", 9) == 0) {
+        const char* p = cmd + 9;
+        while (*p == ' ' || *p == ',') p++;
+        char target[16] = {0};
+        uint8_t ti = 0;
+        while (*p && *p != ' ' && ti < sizeof(target) - 1) target[ti++] = *p++;
+        while (*p == ' ') p++;
+        if (!target[0] || !*p) {
+            out.println("$ERR L CONFIG expects uid base64_profile");
+            return true;
+        }
+
+        uint32_t uid;
+        if (!parseUidHex(target, uid)) {
+            out.println("$ERR L CONFIG bad_uid");
+            return true;
+        }
+        uint8_t slot = registry.findByUid(uid);
+        if (slot == 0xFF) {
+            out.println("$ERR L CONFIG unknown_uid");
+            return true;
+        }
+        const RegisteredModule* m = registry.getModule(slot);
+        if (!moduleIsLogger(m)) {
+            out.println("$ERR L CONFIG target_not_logger");
+            return true;
+        }
+
+        size_t b64Len = strlen(p);
+        while (b64Len > 0 && (p[b64Len - 1] == ' ' || p[b64Len - 1] == '\t')) {
+            b64Len--;
+        }
+        unsigned char decoded[WB_LOGGER_PROFILE_MAX_ENCODED];
+        size_t decodedLen = 0;
+        int ret = mbedtls_base64_decode(decoded, sizeof(decoded), &decodedLen,
+                                        (const unsigned char*)p, b64Len);
+        if (ret != 0 || decodedLen == 0 || decodedLen > WB_LOGGER_PROFILE_MAX_ENCODED) {
+            out.printf("$ERR L CONFIG b64_decode ret=%d\n", ret);
+            return true;
+        }
+
+        WBLoggerProfile parsed;
+        if (!wbLoggerProfileDecode(decoded, (uint16_t)decodedLen, parsed)) {
+            out.println("$ERR L CONFIG bad_profile");
+            return true;
+        }
+
+        bool ok = provisionLoggerForSlot(slot, decoded, (uint16_t)decodedLen,
+                                         parsed.configRev);
+        if (!ok) {
+            out.println("$ERR L CONFIG send_failed");
+            return true;
+        }
+        out.printf("$OK L CONFIG %s rev=%lu subs=%u\n",
+                   uidHex(uid), (unsigned long)parsed.configRev,
+                   (unsigned)parsed.count);
+        emitLoggerInfo();
+        return true;
+    }
+
+    return false;
+}
+
+bool handleWirelessHostCommand(const char* cmd) {
+    if (strcmp(cmd, "$W,INFO") == 0) {
+        IPAddress ip = WiFi.softAPIP();
+        out.printf("$WIFI,AP,%s,%s,%u\n", g_wifiSsid, ip.toString().c_str(),
+                   (unsigned)WB_WIFI_DEFAULT_PORT);
+        out.printf("$WIFI,PASS,%s\n", g_wifiPass);
+        out.printf("$WIFI,TOKEN,%s\n", g_wifiToken);
+        return true;
+    }
+
+    if (strncmp(cmd, "$W,CONFIG", 9) == 0) {
+        const char* p = cmd + 9;
+        while (*p == ' ' || *p == ',') p++;
+        char target[16] = {0};
+        uint8_t ti = 0;
+        while (*p && *p != ' ' && ti < sizeof(target) - 1) target[ti++] = *p++;
+        while (*p == ' ') p++;
+        if (!target[0] || !*p) {
+            out.println("$ERR W CONFIG expects ALL|uid mode");
+            return true;
+        }
+        if (!isTransportModeText(p)) {
+            out.println("$ERR W CONFIG bad_mode");
+            return true;
+        }
+        WBTransportMode mode = wbTransportModeFromName(p);
+        uint8_t changed = 0;
+        if (strcmp(target, "ALL") == 0) {
+            for (uint8_t s = 1; s < WB_MAX_MODULES; s++) {
+                const RegisteredModule* m = registry.getModule(s);
+                if (!m) continue;
+                if (registry.setTransportMode(s, mode)) {
+                    changed++;
+                    emitWirelessState(out, registry.getModule(s));
+                    provisionWirelessForSlot(s, true);
+                }
+            }
+            out.printf("$OK W CONFIG ALL %s changed=%u\n",
+                       wbTransportModeName(mode), (unsigned)changed);
+            return true;
+        }
+        uint32_t uid;
+        if (!parseUidHex(target, uid)) {
+            out.println("$ERR W CONFIG bad_uid");
+            return true;
+        }
+        uint8_t slot = registry.findByUid(uid);
+        if (slot == 0xFF) {
+            out.println("$ERR W CONFIG unknown_uid");
+            return true;
+        }
+        registry.setTransportMode(slot, mode);
+        emitWirelessState(out, registry.getModule(slot));
+        provisionWirelessForSlot(slot, true);
+        out.printf("$OK W CONFIG %s %s\n", uidHex(uid), wbTransportModeName(mode));
+        return true;
+    }
+
+    return false;
+}
 
 // Resolve "<uidHex>" arg to a slot. Returns 0xFF if not found.
 uint8_t resolveUidArg(const char* uidStr) {
@@ -1052,6 +1493,8 @@ void handleSerialCommand(const char* cmd) {
     if (strcmp(cmd, "$Q,STATUS") == 0) { emitStatusSnapshot(); return; }
     if (strcmp(cmd, "$Q,TOPO")   == 0) { emitTopology();       return; }
     if (strcmp(cmd, "$Q,ECA")    == 0) { emitEcaSnapshot();    return; }
+    if (handleLoggerHostCommand(cmd)) return;
+    if (handleWirelessHostCommand(cmd)) return;
 
     // $Q,FORGET ALL          — wipe entire topology memory + NVS blob
     // $Q,FORGET <uidHex>     — wipe one entry (also flushes NVS now)
@@ -1157,8 +1600,10 @@ bool handleEcaCommand(const char* cmd, size_t len) {
             int paramCount = count - 1;
             if (paramCount > 10) paramCount = 10;
             for (int i = 0; i < paramCount; i++) params[i] = (uint8_t)parts[i + 1];
-            protocol.sendActuatorCommand(slot, c, params, (uint8_t)paramCount);
-            out.printf("$OK A slot=%d cmd=%d\n", slot, c);
+            const RegisteredModule* m = registry.getModule(slot);
+            uint32_t uid = m ? m->uid : 0;
+            bool ok = dispatchActuatorForLink(slot, uid, c, params, (uint8_t)paramCount);
+            out.printf("$OK A slot=%d cmd=%d route=%s\n", slot, c, ok ? "sent" : "none");
         }
         return true;
     }
@@ -1173,8 +1618,9 @@ bool handleEcaCommand(const char* cmd, size_t len) {
         while (*p == ' ') p++;
         if (!*p) return true;
         int ch = atoi(p);
-        if (enable) protocol.sendTopicEnable(slot, (uint8_t)ch);
-        else        protocol.sendTopicDisable(slot, (uint8_t)ch);
+        const RegisteredModule* m = registry.getModule(slot);
+        uint32_t uid = m ? m->uid : 0;
+        dispatchTopicForLink(slot, uid, (uint8_t)ch, enable);
         out.printf("$OK T%c slot=%d ch=%d\n", enable ? 'E' : 'D', slot, ch);
         return true;
     }
@@ -1184,7 +1630,12 @@ bool handleEcaCommand(const char* cmd, size_t len) {
         while (*p == ' ') p++;
         uint8_t slot = resolveUidArg(p);
         if (slot == 0xFF) { out.println("$ERR TA bad_uid"); return true; }
-        protocol.sendTopicEnableAll(slot);
+        const RegisteredModule* m = registry.getModule(slot);
+        if (m) {
+            for (uint8_t ch = 0; ch < WB_CH_MAX; ch++) {
+                dispatchTopicForLink(slot, m->uid, ch, true);
+            }
+        }
         out.printf("$OK TA slot=%d\n", slot);
         return true;
     }
@@ -1217,6 +1668,7 @@ void onSlotDetached(uint32_t uid) {
 }
 void onSlotRemoved(uint32_t uid) {
     out.printf("$U,%s\n", uidHex(uid));
+    forwardLoggerRecord(uid, 0, WB_LOGGER_RECORD_TOPOLOGY_EVENT, 2, 0.0f);
     // A remove is the only signal that this UID is "gone for good"
     // (TTL reap, evict, ensureFaceFree's stale-DETACHED cleanup all
     // funnel through here). Drop its memory entry so it doesn't override
@@ -1386,6 +1838,376 @@ void processBleCommands() {
     }
 }
 
+// ── Wi-Fi / OSC fallback implementation ───────────────────────
+static const char* oscStringArg(const WBOscMessage& msg, uint8_t idx) {
+    if (idx >= msg.argc || msg.args[idx].type != 's') return "";
+    return msg.args[idx].s;
+}
+
+static int32_t oscIntArg(const WBOscMessage& msg, uint8_t idx, int32_t fallback = 0) {
+    if (idx >= msg.argc || msg.args[idx].type != 'i') return fallback;
+    return msg.args[idx].i;
+}
+
+static float oscFloatArg(const WBOscMessage& msg, uint8_t idx, float fallback = 0.0f) {
+    if (idx >= msg.argc || msg.args[idx].type != 'f') return fallback;
+    return msg.args[idx].f;
+}
+
+static bool oscTokenOk(const WBOscMessage& msg, uint8_t idx) {
+    const char* token = oscStringArg(msg, idx);
+    return token[0] != '\0' && strcmp(token, g_wifiToken) == 0;
+}
+
+static void wifiRandomHex(char* out, size_t outLen, uint8_t chars) {
+    static const char kHexDigits[] = "0123456789ABCDEF";
+    if (!out || outLen == 0) return;
+    uint8_t n = min((uint8_t)(outLen - 1), chars);
+    uint32_t r = 0;
+    for (uint8_t i = 0; i < n; i++) {
+        if ((i % 8) == 0) {
+            r = esp_random();
+        }
+        out[i] = kHexDigits[(r >> ((i % 8) * 4)) & 0x0F];
+    }
+    out[n] = '\0';
+}
+
+static void wifiBuildDefaults() {
+    uint64_t mac = ESP.getEfuseMac();
+    uint16_t shortId = (uint16_t)(((mac >> 32) ^ mac) & 0xFFFF);
+    uint32_t hubId = ((uint32_t)shortId << 16) |
+                     (uint32_t)(((mac >> 16) ^ mac) & 0xFFFF);
+
+    WBWirelessConfig cfg;
+    bool loaded = wbWirelessConfigLoad(cfg, "wbwifi_hub");
+    if (!loaded || !cfg.ssid[0] || !cfg.pass[0] || !cfg.token[0]) {
+        wbWirelessConfigDefaults(cfg);
+        cfg.enabled = 1;
+        cfg.mode = WB_TRANSPORT_CAN_PRIMARY_WIFI_FALLBACK;
+        cfg.hubId = hubId;
+        cfg.port = WB_WIFI_DEFAULT_PORT;
+        snprintf(cfg.ssid, sizeof(cfg.ssid), "HEX-%04X", (unsigned)shortId);
+        char passHex[17];
+        wifiRandomHex(passHex, sizeof(passHex), 16);
+        snprintf(cfg.pass, sizeof(cfg.pass), "hex-%s", passHex);
+        wifiRandomHex(cfg.token, sizeof(cfg.token), WB_WIFI_MAX_TOKEN_LEN);
+        wbWirelessConfigSave(cfg, "wbwifi_hub");
+    }
+
+    g_wifiHubId = cfg.hubId ? cfg.hubId : hubId;
+    strlcpy(g_wifiSsid, cfg.ssid, sizeof(g_wifiSsid));
+    strlcpy(g_wifiPass, cfg.pass, sizeof(g_wifiPass));
+    strlcpy(g_wifiToken, cfg.token, sizeof(g_wifiToken));
+}
+
+static bool wifiSendOsc(IPAddress ip, uint16_t port, const uint8_t* data, size_t len) {
+    if (!g_wifiApRunning || port == 0 || len == 0) return false;
+    if (!g_wifiUdp.beginPacket(ip, port)) return false;
+    g_wifiUdp.write(data, len);
+    return g_wifiUdp.endPacket() == 1;
+}
+
+static bool wifiSendAck(IPAddress ip, uint16_t port, const char* uid,
+                        int32_t msgId, const char* status) {
+    WBOscEncoder enc;
+    if (!wbOscStart(enc, g_wifiTxBuf, sizeof(g_wifiTxBuf), "/wb/ack", "sis")) return false;
+    if (!wbOscAddString(enc, uid ? uid : "")) return false;
+    if (!wbOscAddInt(enc, msgId)) return false;
+    if (!wbOscAddString(enc, status ? status : "ok")) return false;
+    return wifiSendOsc(ip, port, enc.data, enc.len);
+}
+
+static bool wifiSendNack(IPAddress ip, uint16_t port, const char* uid,
+                         int32_t msgId, const char* reason) {
+    WBOscEncoder enc;
+    if (!wbOscStart(enc, g_wifiTxBuf, sizeof(g_wifiTxBuf), "/wb/nack", "sis")) return false;
+    if (!wbOscAddString(enc, uid ? uid : "")) return false;
+    if (!wbOscAddInt(enc, msgId)) return false;
+    if (!wbOscAddString(enc, reason ? reason : "err")) return false;
+    return wifiSendOsc(ip, port, enc.data, enc.len);
+}
+
+static bool wifiSendDescriptorRequest(IPAddress ip, uint16_t port, uint32_t uid,
+                                      uint16_t fwHash) {
+    char uidBuf[9];
+    formatUidHex(uid, uidBuf, sizeof(uidBuf));
+    WBOscEncoder enc;
+    if (!wbOscStart(enc, g_wifiTxBuf, sizeof(g_wifiTxBuf),
+                    "/wb/descriptor/request", "siis")) return false;
+    if (!wbOscAddString(enc, uidBuf)) return false;
+    if (!wbOscAddInt(enc, fwHash)) return false;
+    if (!wbOscAddInt(enc, g_wifiMsgId++)) return false;
+    if (!wbOscAddString(enc, g_wifiToken)) return false;
+    return wifiSendOsc(ip, port, enc.data, enc.len);
+}
+
+static bool wifiSendActuator(uint8_t slot, uint32_t uid, uint8_t cmd,
+                             const uint8_t* params, uint8_t paramLen) {
+    const RegisteredModule* m = registry.getModule(slot);
+    if (!m || !moduleHasWifiEndpoint(m)) return false;
+    char uidBuf[9];
+    formatUidHex(uid, uidBuf, sizeof(uidBuf));
+    WBOscEncoder enc;
+    if (!wbOscStart(enc, g_wifiTxBuf, sizeof(g_wifiTxBuf), "/wb/action", "siiibs")) {
+        return false;
+    }
+    if (!wbOscAddString(enc, uidBuf)) return false;
+    if (!wbOscAddInt(enc, cmd)) return false;
+    if (!wbOscAddInt(enc, g_wifiMsgId++)) return false;
+    if (!wbOscAddInt(enc, paramLen)) return false;
+    if (!wbOscAddBlob(enc, params, paramLen)) return false;
+    if (!wbOscAddString(enc, g_wifiToken)) return false;
+    return wifiSendOsc(IPAddress(m->wifiIp), m->wifiPort, enc.data, enc.len);
+}
+
+static bool wifiSendTopic(uint8_t slot, uint32_t uid, uint8_t channelId, bool enable) {
+    const RegisteredModule* m = registry.getModule(slot);
+    if (!m || !moduleHasWifiEndpoint(m)) return false;
+    char uidBuf[9];
+    formatUidHex(uid, uidBuf, sizeof(uidBuf));
+    WBOscEncoder enc;
+    if (!wbOscStart(enc, g_wifiTxBuf, sizeof(g_wifiTxBuf), "/wb/topic", "siiis")) {
+        return false;
+    }
+    if (!wbOscAddString(enc, uidBuf)) return false;
+    if (!wbOscAddInt(enc, channelId)) return false;
+    if (!wbOscAddInt(enc, enable ? 1 : 0)) return false;
+    if (!wbOscAddInt(enc, g_wifiMsgId++)) return false;
+    if (!wbOscAddString(enc, g_wifiToken)) return false;
+    return wifiSendOsc(IPAddress(m->wifiIp), m->wifiPort, enc.data, enc.len);
+}
+
+static bool dispatchActuatorForLink(uint8_t slot, uint32_t uid, uint8_t cmd,
+                                    const uint8_t* params, uint8_t paramLen) {
+    const RegisteredModule* m = registry.getModule(slot);
+    if (!m) return false;
+    bool sent = false;
+    if (shouldRouteActionCan(m)) {
+        protocol.sendActuatorCommand(slot, cmd, params, paramLen);
+        sent = true;
+    }
+    if (shouldRouteActionWifi(m)) {
+        sent = wifiSendActuator(slot, uid, cmd, params, paramLen) || sent;
+    }
+    if (sent) {
+        forwardLoggerRecord(uid, cmd, WB_LOGGER_RECORD_ECA_EVENT, 0, 1.0f);
+    }
+    return sent;
+}
+
+static bool dispatchTopicForLink(uint8_t slot, uint32_t uid, uint8_t channelId,
+                                 bool enable) {
+    const RegisteredModule* m = registry.getModule(slot);
+    if (!m) return false;
+    bool sent = false;
+    if (shouldRouteActionCan(m)) {
+        if (enable) protocol.sendTopicEnable(slot, channelId);
+        else        protocol.sendTopicDisable(slot, channelId);
+        sent = true;
+    }
+    if (shouldRouteActionWifi(m)) {
+        sent = wifiSendTopic(slot, uid, channelId, enable) || sent;
+    }
+    return sent;
+}
+
+static void handleWirelessHello(const WBOscMessage& msg, IPAddress ip, uint16_t port) {
+    const char* uidText = oscStringArg(msg, 0);
+    int32_t fwHash = oscIntArg(msg, 1);
+    const char* modeText = oscStringArg(msg, 2);
+    int32_t seq = oscIntArg(msg, 3);
+    if (!oscTokenOk(msg, 4)) {
+        wifiSendNack(ip, port, uidText, seq, "bad_token");
+        return;
+    }
+
+    uint32_t uid;
+    if (!parseUidHex(uidText, uid)) {
+        wifiSendNack(ip, port, uidText, seq, "bad_uid");
+        return;
+    }
+    WBTransportMode mode = wbTransportModeFromName(modeText);
+    uint32_t now = millis();
+    uint8_t slot = registry.findByUid(uid);
+
+    if (slot == 0xFF) {
+        uint8_t newSlot = registry.nextFreeSlot();
+        if (newSlot == 0xFF) newSlot = registry.evictOldestDetached(onSlotRemoved);
+        if (newSlot == 0xFF) {
+            wifiSendNack(ip, port, uidText, seq, "no_slot");
+            return;
+        }
+        registry.addRemotePending(uid, newSlot, (uint16_t)fwHash, mode);
+        registry.setWirelessEndpoint(newSlot, (uint32_t)ip, port);
+        noteWifiSeenForSlot(newSlot, now);
+        emitModuleHello(out, registry.getModule(newSlot));
+        emitModuleIdentity(out, registry.getModule(newSlot));
+        wifiSendAck(ip, port, uidText, seq, "hello");
+        wifiSendDescriptorRequest(ip, port, uid, (uint16_t)fwHash);
+        return;
+    }
+
+    registry.setWirelessEndpoint(slot, (uint32_t)ip, port);
+    noteWifiSeenForSlot(slot, now);
+    const RegisteredModule* m = registry.getModule(slot);
+    if (!m) return;
+    if (m->state == MODULE_DETACHED) registry.markReattached(slot, now);
+    if (!m->hasDescriptor || m->fwHash != (uint16_t)fwHash) {
+        registry.markDescriptorPending(slot, (uint16_t)fwHash);
+        wifiSendDescriptorRequest(ip, port, uid, (uint16_t)fwHash);
+    }
+    emitModuleHello(out, registry.getModule(slot));
+    emitModuleIdentity(out, registry.getModule(slot));
+    wifiSendAck(ip, port, uidText, seq, "hello");
+}
+
+static void handleWirelessHeartbeat(const WBOscMessage& msg, IPAddress ip, uint16_t port) {
+    const char* uidText = oscStringArg(msg, 0);
+    int32_t seq = oscIntArg(msg, 1);
+    if (!oscTokenOk(msg, 3)) {
+        wifiSendNack(ip, port, uidText, seq, "bad_token");
+        return;
+    }
+    uint32_t uid;
+    if (!parseUidHex(uidText, uid)) return;
+    uint8_t slot = registry.findByUid(uid);
+    if (slot == 0xFF) return;
+    const RegisteredModule* m = registry.getModule(slot);
+    if (m && m->state == MODULE_DETACHED) {
+        registry.markRemoteUnplaced(slot);
+        registry.markReattached(slot, millis());
+    }
+    registry.setWirelessEndpoint(slot, (uint32_t)ip, port);
+    noteWifiSeenForSlot(slot, millis());
+    emitWirelessState(out, registry.getModule(slot));
+}
+
+static void handleWirelessSensor(const WBOscMessage& msg, IPAddress ip, uint16_t port) {
+    const char* uidText = oscStringArg(msg, 0);
+    uint8_t ch = (uint8_t)oscIntArg(msg, 1);
+    float value = oscFloatArg(msg, 2);
+    uint32_t seq = (uint32_t)oscIntArg(msg, 3);
+    if (!oscTokenOk(msg, 4)) return;
+    uint32_t uid;
+    if (!parseUidHex(uidText, uid)) return;
+    uint8_t slot = registry.findByUid(uid);
+    if (slot == 0xFF || slot >= WB_MAX_MODULES || ch >= WB_CH_MAX) return;
+    const RegisteredModule* m = registry.getModule(slot);
+    if (!m) return;
+    if (m->state == MODULE_DETACHED) {
+        registry.markRemoteUnplaced(slot);
+        registry.markReattached(slot, millis());
+    }
+    m = registry.getModule(slot);
+    if (!m || m->state != MODULE_REGISTERED) return;
+    registry.setWirelessEndpoint(slot, (uint32_t)ip, port);
+    noteWifiSeenForSlot(slot, millis());
+    m = registry.getModule(slot);
+    if (!shouldAcceptWifiSensor(m)) return;
+    if (seq != 0 && seq <= g_wifiLastSensorSeq[slot][ch]) return;
+    g_wifiLastSensorSeq[slot][ch] = seq;
+    uint8_t payload[4];
+    memcpy(payload, &value, 4);
+    eca.updateSensor(slot, ch, payload, sizeof(payload));
+    out.printf("$S,%s,%d,%.4f\n", uidHex(uid), ch, value);
+    if (m->topologyState != WB_TOPO_PHYSICAL ||
+        m->activeLink == WB_LINK_WIFI ||
+        !shouldAcceptCanSensor(m)) {
+        forwardLoggerRecord(uid, ch, WB_LOGGER_RECORD_SENSOR, 0, value);
+    }
+    sampleCount++;
+}
+
+static void handleWirelessDescriptorBlob(const WBOscMessage& msg,
+                                         IPAddress ip, uint16_t port) {
+    const char* uidText = oscStringArg(msg, 0);
+    int32_t fwHash = oscIntArg(msg, 1);
+    int32_t seq = oscIntArg(msg, 2);
+    if (msg.argc < 5 || msg.args[3].type != 'b' || !oscTokenOk(msg, 4)) {
+        wifiSendNack(ip, port, uidText, seq, "bad_descriptor");
+        return;
+    }
+    uint32_t uid;
+    if (!parseUidHex(uidText, uid)) {
+        wifiSendNack(ip, port, uidText, seq, "bad_uid");
+        return;
+    }
+    uint8_t slot = registry.findByUid(uid);
+    if (slot == 0xFF) {
+        wifiSendNack(ip, port, uidText, seq, "unknown_uid");
+        return;
+    }
+    WearBlocksDescriptor desc;
+    if (!desc.deserialize(msg.args[3].b, msg.args[3].bLen)) {
+        wifiSendNack(ip, port, uidText, seq, "parse_fail");
+        return;
+    }
+    registry.markDescriptorPending(slot, (uint16_t)fwHash);
+    if (!registry.registerDescriptor(slot, desc)) {
+        wifiSendNack(ip, port, uidText, seq, "register_fail");
+        return;
+    }
+    const RegisteredModule* m = registry.getModule(slot);
+    if (!m) return;
+    out.printf("$D,%s,%s\n", uidHex(m->uid), desc.toJSON().c_str());
+    emitModuleIdentity(out, m);
+    emitWirelessState(out, m);
+    eca.autoEnableTopicsForUid(m->uid);
+    forwardLoggerRecord(m->uid, 0, WB_LOGGER_RECORD_TOPOLOGY_EVENT, 1, 1.0f);
+    if (moduleIsLogger(m)) emitLoggerInfo();
+    wifiSendAck(ip, port, uidText, seq, "descriptor");
+}
+
+static void processWifiOscMessage(const WBOscMessage& msg, IPAddress ip, uint16_t port) {
+    if (strcmp(msg.address, "/wb/module/hello") == 0) {
+        handleWirelessHello(msg, ip, port);
+    } else if (strcmp(msg.address, "/wb/module/heartbeat") == 0) {
+        handleWirelessHeartbeat(msg, ip, port);
+    } else if (strcmp(msg.address, "/wb/sensor") == 0) {
+        handleWirelessSensor(msg, ip, port);
+    } else if (strcmp(msg.address, "/wb/descriptor/blob") == 0) {
+        handleWirelessDescriptorBlob(msg, ip, port);
+    }
+}
+
+static void wifiSetup() {
+    wifiBuildDefaults();
+    WiFi.mode(WIFI_AP);
+    bool ok = WiFi.softAP(g_wifiSsid, g_wifiPass);
+    if (!ok) {
+        Serial.println("[WIFI] SoftAP start failed");
+        return;
+    }
+    g_wifiApRunning = g_wifiUdp.begin(WB_WIFI_DEFAULT_PORT) == 1;
+    IPAddress ip = WiFi.softAPIP();
+    Serial.printf("[OK] Wi-Fi AP: ssid=%s ip=%s udp=%u token=%s\n",
+                  g_wifiSsid, ip.toString().c_str(),
+                  (unsigned)WB_WIFI_DEFAULT_PORT, g_wifiToken);
+    out.printf("$WIFI,AP,%s,%s,%u\n", g_wifiSsid, ip.toString().c_str(),
+               (unsigned)WB_WIFI_DEFAULT_PORT);
+}
+
+static void processWifiUdp() {
+    if (!g_wifiApRunning) return;
+    int packetLen = g_wifiUdp.parsePacket();
+    while (packetLen > 0) {
+        if ((size_t)packetLen > sizeof(g_wifiRxBuf)) {
+            while (g_wifiUdp.available()) g_wifiUdp.read();
+        } else {
+            int n = g_wifiUdp.read(g_wifiRxBuf, sizeof(g_wifiRxBuf));
+            if (n > 0) {
+                WBOscMessage msg;
+                if (wbOscDecode(g_wifiRxBuf, (size_t)n, msg)) {
+                    processWifiOscMessage(msg, g_wifiUdp.remoteIP(),
+                                          g_wifiUdp.remotePort());
+                }
+            }
+        }
+        packetLen = g_wifiUdp.parsePacket();
+    }
+}
+
 // ── Setup ─────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
@@ -1407,6 +2229,7 @@ void setup() {
     Serial.printf("[OK] CAN: TX=GPIO%d RX=GPIO%d @500kbps\n", CAN_TX_PIN, CAN_RX_PIN);
 
     bleSetup();
+    wifiSetup();
 
     Serial.print("[OK] Face pins:");
     for (uint8_t i = 0; i < 6; i++) {
@@ -1430,9 +2253,10 @@ void setup() {
     protocol.onDescriptorReceived(onModuleDescriptor);
     protocol.onSensorData(onSensorData);
     protocol.onChildEvent(onChildEvent);
+    protocol.onSysConfigAck(onSysConfigAck);
 
     eca.begin(protocol);
-    // Wire ECA's UID→slot lookup to the registry so v3 bytecode (which
+    // Wire ECA's UID→slot lookup to the registry so v4 bytecode (which
     // carries module UIDs, not slots) can resolve refs at execute time.
     eca.setUidResolver([](uint32_t uid) -> uint8_t {
         // Only REGISTERED modules resolve to a usable slot. DETACHED and
@@ -1445,6 +2269,8 @@ void setup() {
         if (!m || m->state != MODULE_REGISTERED) return 0;
         return slot;
     });
+    eca.setActuatorDispatcher(dispatchActuatorForLink);
+    eca.setTopicDispatcher(dispatchTopicForLink);
 
     if (STATUS_LED != 255) digitalWrite(STATUS_LED, LOW);
     statsStart = millis();
@@ -1473,6 +2299,7 @@ void setup() {
 void loop() {
     processSerialCommands();
     processBleCommands();
+    processWifiUdp();
     protocol.processIncoming();
     eca.tick();
 

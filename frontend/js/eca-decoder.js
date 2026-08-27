@@ -14,7 +14,7 @@
  */
 
 import {
-  CH, REF, VC_OP, COND_OP, LOGIC, ACT,
+  CH, REF, VC_OP, COND_OP, LOGIC, ACT, ACTION_MODE,
   encodeProgram,
 } from './eca-encoder.js';
 
@@ -32,6 +32,7 @@ const VC_OP_NAME   = invert(VC_OP);     // 0  → 'ADD'
 const COND_OP_NAME = invert(COND_OP);   // 0  → 'GT'
 const LOGIC_NAME   = invert(LOGIC);     // 0  → 'AND'
 const ACT_NAME     = invert(ACT);       // 1  → 'LED_SOLID'
+const ACTION_MODE_NAME = invert(ACTION_MODE);
 
 // Human-friendly channel labels for the inspector. Falls back to CH_NAME
 // when a channel id isn't in the table (e.g. future additions).
@@ -59,15 +60,15 @@ const ACT_CMD_INFO = {
   [ACT.LED_BLINK]:      { name: 'LED blink',      params: [] },
   [ACT.LED_RAINBOW]:    { name: 'LED rainbow',    params: [] },
   [ACT.LED_STOP]:       { name: 'LED stop',       params: [] },
-  [ACT.VIBRATE]:        { name: 'Vibrate',        params: ['intensity%', 'ms'] },
-  [ACT.VIBRATE_PULSE]:  { name: 'Vibrate pulse',  params: ['intensity%', 'on×10ms', 'off×10ms', 'count'] },
-  [ACT.VIBRATE_RAMP]:   { name: 'Vibrate ramp',   params: ['from%', 'to%', '×100ms'] },
+  [ACT.VIBRATE]:        { name: 'Vibrate',        params: ['intensity%'] },
+  [ACT.VIBRATE_PULSE]:  { name: 'Vibrate pulse',  params: ['intensity%', 'on_ms', 'off_ms', 'count'] },
+  [ACT.VIBRATE_RAMP]:   { name: 'Vibrate ramp',   params: ['from%', 'to%'] },
   [ACT.VIBRATE_STOP]:   { name: 'Vibrate stop',   params: [] },
   [ACT.VAR_SET]:        { name: 'Var set',        params: ['value'] },
   [ACT.VAR_INC]:        { name: 'Var inc',        params: ['delta'] },
   [ACT.VAR_RESET]:      { name: 'Var reset',      params: [] },
   [ACT.VAR_TOGGLE]:     { name: 'Var toggle',     params: [] },
-  [ACT.AUDIO_SET_TONE]: { name: 'Audio tone',     params: ['freq_lo', 'freq_hi', 'amp'] },
+  [ACT.AUDIO_SET_TONE]: { name: 'Audio tone',     params: ['freq_hz', 'amp'] },
   [ACT.AUDIO_STOP]:     { name: 'Audio stop',     params: [] },
   [ACT.MOTOR_SET]:      { name: 'Motor set',      params: ['motor', 'mode', 'speed', 'duration_ms'] },
 };
@@ -83,7 +84,12 @@ const COND_OP_SYM = {
 class ByteReader {
   constructor(bytes) { this.bytes = bytes; this.idx = 0; }
   remaining() { return this.bytes.length - this.idx; }
-  u8()  { return this.bytes[this.idx++]; }
+  ensure(n) {
+    if (this.remaining() < n) {
+      throw new Error(`decodeBytecode: truncated at byte ${this.idx} (need ${n})`);
+    }
+  }
+  u8()  { this.ensure(1); return this.bytes[this.idx++]; }
   u16() {
     // big-endian (matches ByteWriter.u16 in encoder).
     const hi = this.u8(); const lo = this.u8();
@@ -125,14 +131,10 @@ function decodeCondition(r) {
   const ref_ch    = r.u8();
   const op        = r.u8();
   const threshold = r.f32();
-  const hold_ms   = r.u16();
-  const cooldown_ms = r.u16();
   return {
     ref: { type: ref_type, id: refIdFromU32(ref_type, ref_id), ch: ref_ch },
     op,
     threshold,
-    hold_ms,
-    cooldown_ms,
   };
 }
 
@@ -162,12 +164,19 @@ function decodeActionParam(r) {
 function decodeAction(r) {
   const target_u32 = r.u32();
   const cmd        = r.u8();
+  const mode       = r.u8();
   const numParams  = r.u8();
+  if (mode > ACTION_MODE.STREAM) throw new Error(`decodeBytecode: invalid action mode ${mode}`);
+  if (numParams > 4) throw new Error(`decodeBytecode: too many action params ${numParams}`);
+  const delay_ms   = r.u32();
+  const duration_ms = r.u32();
+  const update_interval_ms = r.u16();
   const params = [];
   for (let i = 0; i < numParams; i++) params.push(decodeActionParam(r));
   // Target is a UID for actuator cmds; for VAR_* it's a var_id (low byte).
   // We always preserve as 8-char hex so re-encoding produces the same u32.
-  return { target: uidToHex(target_u32), cmd, params };
+  return { target: uidToHex(target_u32), cmd, mode, delay_ms, duration_ms,
+           update_interval_ms, params };
 }
 
 // ── Main decoder ──
@@ -191,12 +200,12 @@ export function decodeBytecode(input) {
     throw new Error('decodeBytecode: input must be Uint8Array or base64 string');
   }
 
-  if (bytes.length < 4) throw new Error('decodeBytecode: too short');
+  if (bytes.length < 6) throw new Error('decodeBytecode: too short');
   if (bytes[0] !== 0x57 || bytes[1] !== 0x42) {
     throw new Error(`decodeBytecode: bad magic 0x${bytes[0].toString(16)}${bytes[1].toString(16)}`);
   }
   const version = bytes[2];
-  if (version !== 0x03) throw new Error(`decodeBytecode: bad version 0x${version.toString(16)}`);
+  if (version !== 0x04) throw new Error(`decodeBytecode: bad version 0x${version.toString(16)}`);
 
   // Verify checksum (sum of all bytes except last == last byte)
   let chk = 0;
@@ -211,24 +220,36 @@ export function decodeBytecode(input) {
   r.idx = 3;  // skip magic + version
 
   const numVars = r.u8();
+  if (numVars > 8) throw new Error(`decodeBytecode: too many variables ${numVars}`);
   const variables = [];
   for (let i = 0; i < numVars; i++) variables.push(r.f32());
 
   const numVCs = r.u8();
+  if (numVCs > 8) throw new Error(`decodeBytecode: too many virtual channels ${numVCs}`);
   const virtual_channels = [];
   for (let i = 0; i < numVCs; i++) virtual_channels.push(decodeVC(r));
 
   const numRules = r.u8();
+  if (numRules > 16) throw new Error(`decodeBytecode: too many rules ${numRules}`);
   const rules = [];
   for (let i = 0; i < numRules; i++) {
     const num_cond = r.u8();
     const logic    = r.u8();
     const num_act  = r.u8();
+    if (num_cond > 4 || num_act > 4) {
+      throw new Error(`decodeBytecode: too many conditions/actions ${num_cond}/${num_act}`);
+    }
+    const hold_ms = r.u32();
+    const cooldown_ms = r.u32();
     const conditions = [];
     for (let c = 0; c < num_cond; c++) conditions.push(decodeCondition(r));
     const actions = [];
     for (let a = 0; a < num_act; a++) actions.push(decodeAction(r));
-    rules.push({ conditions, logic, actions });
+    rules.push({ conditions, logic, hold_ms, cooldown_ms, actions });
+  }
+
+  if (r.remaining() !== 0) {
+    throw new Error(`decodeBytecode: trailing payload bytes ${r.remaining()}`);
   }
 
   return { version, variables, virtual_channels, rules };
@@ -263,9 +284,7 @@ function fmtRef(ref, modulesByUid) {
 
 function fmtCondition(c, modulesByUid) {
   const sym = COND_OP_SYM[c.op] ?? `?op${c.op}`;
-  const hold = c.hold_ms ? ` hold ${c.hold_ms}ms` : '';
-  const cd   = c.cooldown_ms ? ` cooldown ${c.cooldown_ms}ms` : '';
-  return `${fmtRef(c.ref, modulesByUid)} ${sym} ${fmtNum(c.threshold)}${hold}${cd}`;
+  return `${fmtRef(c.ref, modulesByUid)} ${sym} ${fmtNum(c.threshold)}`;
 }
 
 function fmtAction(a, modulesByUid) {
@@ -281,7 +300,14 @@ function fmtAction(a, modulesByUid) {
     return label ? `${label}=${val}` : String(val);
   });
   const paramStr = paramTexts.length ? ` [${paramTexts.join(', ')}]` : '';
-  return `${target} → ${info.name}${paramStr}`;
+  const mode = ACTION_MODE_NAME[a.mode] || 'TRIGGER';
+  const timing = [
+    a.delay_ms ? `delay=${a.delay_ms}ms` : '',
+    a.duration_ms ? `duration=${a.duration_ms}ms` : '',
+    mode !== 'TRIGGER' ? `mode=${mode}` : '',
+    mode === 'STREAM' ? `update=${a.update_interval_ms}ms` : '',
+  ].filter(Boolean);
+  return `${target} → ${info.name}${paramStr}${timing.length ? ` (${timing.join(', ')})` : ''}`;
 }
 
 function fmtVC(vc, modulesByUid) {
@@ -313,7 +339,11 @@ export function describeRules(rules, modulesByUid) {
     const condStr = condLines.length === 1
       ? condLines[0]
       : condLines.join(`  [${logicWord}]  `);
-    out.push(`Rule ${i + 1}: When ${condStr}`);
+    const timing = [
+      rule.hold_ms ? `hold ${rule.hold_ms}ms` : '',
+      rule.cooldown_ms ? `cooldown ${rule.cooldown_ms}ms` : '',
+    ].filter(Boolean).join(', ');
+    out.push(`Rule ${i + 1}: When ${condStr}${timing ? ` (${timing})` : ''}`);
     (rule.actions || []).forEach(a => out.push(`         → ${fmtAction(a, modulesByUid)}`));
   });
   return out;
@@ -327,13 +357,14 @@ export function describeRules(rules, modulesByUid) {
 const SELFTEST_FIXTURES = [
   // Minimal: no vars, no vcs, single rule with one cond + one LED action.
   {
-    version: 3,
+    version: 4,
     variables: [],
     virtual_channels: [],
     rules: [{
+      hold_ms: 0, cooldown_ms: 1000,
       conditions: [{
         ref: { type: REF.SLOT, id: 'A1B2C3D4', ch: CH.LIGHT },
-        op: COND_OP.LT, threshold: 0.3, hold_ms: 0, cooldown_ms: 1000,
+        op: COND_OP.LT, threshold: 0.3,
       }],
       logic: LOGIC.AND,
       actions: [{
@@ -348,7 +379,7 @@ const SELFTEST_FIXTURES = [
   },
   // VC + audio + non-CONST action param (vc-driven freq).
   {
-    version: 3,
+    version: 4,
     variables: [],
     virtual_channels: [{
       vc_id: 0, op: VC_OP.MAP,
@@ -357,16 +388,16 @@ const SELFTEST_FIXTURES = [
       c_const: 1,
     }],
     rules: [{
+      hold_ms: 0, cooldown_ms: 0,
       conditions: [{
         ref: { type: REF.CONST, id: '00000000', ch: 0 },
-        op: COND_OP.GTE, threshold: 0, hold_ms: 0, cooldown_ms: 0,
+        op: COND_OP.GTE, threshold: 0,
       }],
       logic: LOGIC.AND,
       actions: [{
         target: 'CAFEBABE', cmd: ACT.AUDIO_SET_TONE,
         params: [
           { type: REF.VC, id: 0, ch: 0, value: 0 },
-          { type: REF.CONST, id: '00000000', ch: 0, value: 2000 },
           { type: REF.CONST, id: '00000000', ch: 0, value: 200 },
         ],
       }],
@@ -374,7 +405,7 @@ const SELFTEST_FIXTURES = [
   },
   // Variables + var actions + 2-cond OR + vibrate.
   {
-    version: 3,
+    version: 4,
     variables: [0.0, 1.5, -3.25],
     virtual_channels: [
       { vc_id: 1, op: VC_OP.MUL,
@@ -389,18 +420,18 @@ const SELFTEST_FIXTURES = [
       },
     ],
     rules: [{
+      hold_ms: 100, cooldown_ms: 500,
       conditions: [
         { ref: { type: REF.SLOT, id: 'A1B2C3D4', ch: CH.ACC_MAG },
-          op: COND_OP.GT, threshold: 1.5, hold_ms: 100, cooldown_ms: 500 },
+          op: COND_OP.GT, threshold: 1.5 },
         { ref: { type: REF.VAR, id: 0, ch: 0 },
-          op: COND_OP.EQ, threshold: 0, hold_ms: 0, cooldown_ms: 0 },
+          op: COND_OP.EQ, threshold: 0 },
       ],
       logic: LOGIC.OR,
       actions: [
-        { target: 'DEADBEEF', cmd: ACT.VIBRATE,
+        { target: 'DEADBEEF', cmd: ACT.VIBRATE, duration_ms: 200,
           params: [
             { type: REF.CONST, id: '00000000', ch: 0, value: 80 },
-            { type: REF.CONST, id: '00000000', ch: 0, value: 200 },
           ],
         },
         { target: '00000000', cmd: ACT.VAR_SET,  // target's low byte = var_id 0

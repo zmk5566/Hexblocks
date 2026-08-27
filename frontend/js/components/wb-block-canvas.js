@@ -9,7 +9,7 @@
  * the workspace → JSON Rules → bytecode → base64 → bridge `program` action.
  */
 import { LitElement, html, svg, css } from 'lit';
-import { programToBase64, REF, VC_OP, COND_OP, LOGIC, ACT } from '../eca-encoder.js';
+import { programToBase64, REF, VC_OP, COND_OP, LOGIC, ACT, ACTION_MODE } from '../eca-encoder.js';
 import { shouldKeepRule } from '../eca-rule-utils.js';
 import { wsClient } from '../ws-client.js';
 import { dispatchOpenPanel } from './open-panel.js';
@@ -186,6 +186,14 @@ export class WbBlockCanvas extends LitElement {
       text-anchor: middle;
       dominant-baseline: central;
       pointer-events: none;
+    }
+    .remote-label {
+      fill: var(--wb-text-dim);
+      font: 600 8px system-ui;
+      text-anchor: middle;
+      dominant-baseline: central;
+      pointer-events: none;
+      letter-spacing: 0;
     }
 
     /* edge */
@@ -622,6 +630,29 @@ export class WbBlockCanvas extends LitElement {
     return elements;
   }
 
+  _renderRemoteModules() {
+    const remotes = (this.modules || []).filter(m =>
+      m?.topology_state === 'remote_unplaced' || m?.parent_remote);
+    if (!remotes.length) return [];
+
+    const out = [];
+    const startX = -120;
+    const startY = 118;
+    const gap = 78;
+    for (let i = 0; i < remotes.length; i++) {
+      const mod = remotes[i];
+      const x = startX + (i % 4) * gap;
+      const y = startY + Math.floor(i / 4) * 68;
+      out.push(this._renderModule(x, y, mod, 0));
+      out.push(svg`
+        <text x="${x}" y="${y + HEX_R + 11}" class="remote-label">
+          ${mod.active_link || 'remote'}
+        </text>
+      `);
+    }
+    return out;
+  }
+
   /** Draw a P/R kind badge at the midpoint of each hub face edge. */
   _renderHubKindBadges() {
     const out = [];
@@ -835,6 +866,7 @@ export class WbBlockCanvas extends LitElement {
           <g style="transform: ${transform}; transform-origin: center;">
             ${this._renderBgPattern()}
             ${this.hubPresent ? this._renderFaces() : ''}
+            ${this.hubPresent ? this._renderRemoteModules() : ''}
             ${this.hubPresent ? this._renderHub() : ''}
           </g>
         </svg>
@@ -1187,14 +1219,14 @@ export class WbBlockCanvas extends LitElement {
           blocks: [{
             type: 'eca_rule',
             x: 20, y: 20,
-            fields: { LOGIC: 'AND' },
+            fields: { LOGIC: 'AND', HOLD: 0, COOLDOWN: 2000 },
             inputs: {
               CONDITIONS: {
                 block: {
                   type: 'sensor_condition',
                   fields: {
                     SLOT: String(sensorUid), CHANNEL: String(channel), OP: 'GT',
-                    THRESHOLD: 0.5, COOLDOWN: 2000,
+                    THRESHOLD: 0.5,
                   },
                 },
               },
@@ -1204,6 +1236,8 @@ export class WbBlockCanvas extends LitElement {
                   fields: {
                     SLOT: String(ledUid), CMD: 'LED_SOLID',
                     R: 255, G: 0, B: 0,
+                    MODE: 'TRIGGER', DELAY: 0, DURATION: 0,
+                    UPDATE_INTERVAL: 50,
                   },
                 },
               },
@@ -1360,6 +1394,12 @@ export class WbBlockCanvas extends LitElement {
         this.appendDummyInput().appendField(new Blockly.FieldDropdown([
           ['ALL match (AND)', 'AND'], ['ANY matches (OR)', 'OR'],
         ]), 'LOGIC');
+        this.appendDummyInput('RULE_TIMING')
+          .appendField('hold')
+          .appendField(new Blockly.FieldNumber(0, 0, 0xFFFFFFFF, 1), 'HOLD')
+          .appendField('ms  cooldown')
+          .appendField(new Blockly.FieldNumber(2000, 0, 0xFFFFFFFF, 1), 'COOLDOWN')
+          .appendField('ms');
         this.appendStatementInput('ACTIONS').setCheck('action').appendField('THEN');
         this.setColour(210);
         this.setTooltip('ECA rule: IF conditions THEN actions');
@@ -1393,12 +1433,6 @@ export class WbBlockCanvas extends LitElement {
         this.appendValueInput('REF')
           .setCheck('ref')
           .appendField('or ref');
-        this.appendDummyInput()
-          .appendField('cooldown')
-          .appendField(new Blockly.FieldNumber(2000, 0), 'COOLDOWN')
-          .appendField('ms  hold')
-          .appendField(new Blockly.FieldNumber(0, 0), 'HOLD')
-          .appendField('ms');
         this.setPreviousStatement(true, 'condition');
         this.setNextStatement(true, 'condition');
         this.setColour(230);
@@ -1421,6 +1455,27 @@ export class WbBlockCanvas extends LitElement {
           }
         });
       },
+    };
+
+    const appendLifecycleFields = (block, { includeDuration = true } = {}) => {
+      const input = block.appendDummyInput('LIFECYCLE')
+        .appendField('mode')
+        .appendField(new Blockly.FieldDropdown([
+          ['trigger once', 'TRIGGER'],
+          ['while condition', 'WHILE_TRUE'],
+          ['stream', 'STREAM'],
+        ]), 'MODE')
+        .appendField('delay')
+        .appendField(new Blockly.FieldNumber(0, 0, 0x7FFFFFFF, 1), 'DELAY')
+        .appendField('ms');
+      if (includeDuration) {
+        input.appendField('duration')
+          .appendField(new Blockly.FieldNumber(0, 0, 0x7FFFFFFF, 1), 'DURATION')
+          .appendField('ms');
+      }
+      input.appendField('update')
+        .appendField(new Blockly.FieldNumber(50, 20, 800, 1), 'UPDATE_INTERVAL')
+        .appendField('ms');
     };
 
     Blockly.Blocks['led_action'] = {
@@ -1447,6 +1502,7 @@ export class WbBlockCanvas extends LitElement {
         this.appendValueInput('B_REF').setCheck('ref')
           .setAlign(Blockly.ALIGN_RIGHT)
           .appendField('B').appendField(new Blockly.FieldNumber(255, 0, 255), 'B');
+        appendLifecycleFields(this);
         this.setPreviousStatement(true, 'action');
         this.setNextStatement(true, 'action');
         this.setColour(0);
@@ -1468,6 +1524,11 @@ export class WbBlockCanvas extends LitElement {
           .appendField('intensity').appendField(new Blockly.FieldNumber(80, 0, 100), 'INTENSITY')
           .appendField('%  dur').appendField(new Blockly.FieldNumber(300, 0, 65535), 'DURATION')
           .appendField('ms');
+        this.appendDummyInput('PULSE_TIMING')
+          .appendField('pulse on').appendField(new Blockly.FieldNumber(100, 1, 2550), 'ON_MS')
+          .appendField('ms off').appendField(new Blockly.FieldNumber(100, 0, 2550), 'OFF_MS')
+          .appendField('ms count').appendField(new Blockly.FieldNumber(3, 1, 255, 1), 'COUNT');
+        appendLifecycleFields(this, { includeDuration: false });
         this.setPreviousStatement(true, 'action');
         this.setNextStatement(true, 'action');
         this.setColour(130);
@@ -1494,6 +1555,7 @@ export class WbBlockCanvas extends LitElement {
         this.appendValueInput('AMP_REF').setCheck('ref')
           .setAlign(Blockly.ALIGN_RIGHT)
           .appendField('amp').appendField(new Blockly.FieldNumber(128, 0, 255), 'AMP');
+        appendLifecycleFields(this);
         this.setPreviousStatement(true, 'action');
         this.setNextStatement(true, 'action');
         this.setColour(AUDIO_MODULE_COLOR);
@@ -1814,6 +1876,8 @@ export class WbBlockCanvas extends LitElement {
     const rules = [];
     for (const rb of ruleBlocks) {
       const logic = rb.getFieldValue('LOGIC') || 'AND';
+      const hold_ms = Math.max(0, Number(rb.getFieldValue('HOLD')) || 0);
+      const cooldown_ms = Math.max(0, Number(rb.getFieldValue('COOLDOWN')) || 0);
 
       const conditions = [];
       let condBlock = rb.getInputTargetBlock('CONDITIONS');
@@ -1848,8 +1912,6 @@ export class WbBlockCanvas extends LitElement {
             ref,
             op: condBlock.getFieldValue('OP'),
             threshold,
-            hold_ms: parseInt(condBlock.getFieldValue('HOLD') || '0'),
-            cooldown_ms: parseInt(condBlock.getFieldValue('COOLDOWN')),
           });
         }
         condBlock = condBlock.getNextBlock();
@@ -1859,6 +1921,12 @@ export class WbBlockCanvas extends LitElement {
       let actBlock = rb.getInputTargetBlock('ACTIONS');
       // Helper: wrap a literal number as a CONST action param.
       const constParam = (v) => ({ type: REF.CONST, id: 0, ch: 0, value: Number(v) || 0 });
+      const lifecycle = (block) => ({
+        mode: block.getFieldValue('MODE') || 'TRIGGER',
+        delay_ms: Math.max(0, Number(block.getFieldValue('DELAY')) || 0),
+        duration_ms: Math.max(0, Number(block.getFieldValue('DURATION')) || 0),
+        update_interval_ms: Math.max(1, Number(block.getFieldValue('UPDATE_INTERVAL')) || 50),
+      });
       // Helper: an action's R/G/B inlets accept either a number field OR a
       // connected ref_* block. The ref wins if present. Input name uses a
       // _REF suffix; the literal FieldNumber stays on the bare channel name.
@@ -1890,20 +1958,29 @@ export class WbBlockCanvas extends LitElement {
               rgbParam(actBlock, 'B'),
             ];
           }
-          actions.push({ target, cmd, params });
+          actions.push({ target, cmd, params, ...lifecycle(actBlock) });
         } else if (actBlock.type === 'vibrate_action') {
           const cmd = actBlock.getFieldValue('CMD');
           const target = actBlock.getFieldValue('SLOT');
           let params = [];
           if (cmd === 'VIBRATE_STOP') {
             params = [];
-          } else {
+          } else if (cmd === 'VIBRATE_PULSE') {
             params = [
               constParam(actBlock.getFieldValue('INTENSITY')),
-              constParam(actBlock.getFieldValue('DURATION')),
+              constParam(actBlock.getFieldValue('ON_MS')),
+              constParam(actBlock.getFieldValue('OFF_MS')),
+              constParam(actBlock.getFieldValue('COUNT')),
             ];
+          } else if (cmd === 'VIBRATE_RAMP') {
+            params = [
+              constParam(0),
+              constParam(actBlock.getFieldValue('INTENSITY')),
+            ];
+          } else {
+            params = [constParam(actBlock.getFieldValue('INTENSITY'))];
           }
-          actions.push({ target, cmd, params });
+          actions.push({ target, cmd, params, ...lifecycle(actBlock) });
         } else if (actBlock.type === 'audio_action') {
           const cmd = actBlock.getFieldValue('CMD');
           const target = actBlock.getFieldValue('SLOT');
@@ -1917,7 +1994,7 @@ export class WbBlockCanvas extends LitElement {
               rgbParam(actBlock, 'AMP'),
             ];
           }
-          actions.push({ target, cmd, params });
+          actions.push({ target, cmd, params, ...lifecycle(actBlock) });
         } else if (actBlock.type === 'motor_action') {
           actions.push({
             target: actBlock.getFieldValue('SLOT'),
@@ -1928,6 +2005,10 @@ export class WbBlockCanvas extends LitElement {
               constParam(actBlock.getFieldValue('SPEED')),
               constParam(actBlock.getFieldValue('DURATION')),
             ],
+            mode: 'TRIGGER',
+            delay_ms: 0,
+            duration_ms: 0,
+            update_interval_ms: 50,
           });
         } else if (actBlock.type === 'variable_action') {
           const cmd = actBlock.getFieldValue('CMD');
@@ -1937,17 +2018,19 @@ export class WbBlockCanvas extends LitElement {
           if (cmd === 'VAR_INC' || cmd === 'VAR_SET') {
             params = [constParam(actBlock.getFieldValue('AMOUNT'))];
           }
-          actions.push({ target, cmd, params });
+          actions.push({ target, cmd, params,
+                         mode: 'TRIGGER', delay_ms: 0, duration_ms: 0,
+                         update_interval_ms: 50 });
         }
         actBlock = actBlock.getNextBlock();
       }
 
       if (shouldKeepRule(conditions, actions)) {
-        rules.push({ conditions, logic, actions });
+        rules.push({ conditions, logic, hold_ms, cooldown_ms, actions });
       }
     }
 
-    return { version: 3, variables: [],
+    return { version: 4, variables: [],
              virtual_channels: this._collectVirtualChannels(), rules };
   }
 
@@ -2060,7 +2143,13 @@ export class WbBlockCanvas extends LitElement {
   _onUpload = () => {
     const program = this._resolveProgram();
     if (!program) return;
-    const b64 = programToBase64(program);
+    let b64;
+    try {
+      b64 = programToBase64(program);
+    } catch (e) {
+      this._setUploadStatus(`Program validation failed: ${e.message || e}`, 'err');
+      return;
+    }
     this._pendingUpload = { b64, rules: program.rules.length };
     if (!wsClient.send({ action: 'program', data: b64 })) {
       this._pendingUpload = null;
@@ -2094,7 +2183,7 @@ export class WbBlockCanvas extends LitElement {
     if (this._editMode === 'blocks') {
       // Snapshot current workspace as JSON so the user has a starting point.
       const program = this._workspaceToRules() || {
-        version: 3, variables: [], virtual_channels: [], rules: [],
+        version: 4, variables: [], virtual_channels: [], rules: [],
       };
       this._jsonText = JSON.stringify(program, null, 2);
       this._editMode = 'json';
@@ -2129,6 +2218,7 @@ const VC_OP_NAME = _invertEnum(VC_OP);
 const COND_OP_NAME = _invertEnum(COND_OP);
 const LOGIC_NAME = _invertEnum(LOGIC);
 const ACT_NAME = _invertEnum(ACT);
+const ACTION_MODE_NAME = _invertEnum(ACTION_MODE);
 
 function _enumName(value, lookup, fallback) {
   if (typeof value === 'string') return value;
@@ -2138,7 +2228,7 @@ function _enumName(value, lookup, fallback) {
 
 function _cloneRules(rules) {
   return JSON.parse(JSON.stringify(rules || {
-    version: 3, variables: [], virtual_channels: [], rules: [],
+    version: 4, variables: [], virtual_channels: [], rules: [],
   }));
 }
 
@@ -2500,10 +2590,17 @@ function _rulesStateFromJSON(rules, modules) {
   ruleList.forEach((rule, idx) => {
     const condBlock = _buildCondChain(rule.conditions, uidByName);
     const actBlock  = _buildActChain(rule.actions, uidByName);
+    const legacyHold = Math.max(0, ...(rule.conditions || []).map(c => Number(c.hold_ms) || 0));
+    const legacyCooldown = Math.max(0, ...(rule.conditions || []).map(c => Number(c.cooldown_ms) || 0));
     blocks.push({
       type: 'eca_rule',
       x: 20, y: rulesYStart + idx * 300,
-      fields: { LOGIC: _enumName(rule.logic, LOGIC_NAME, 'AND') },
+      fields: {
+        LOGIC: _enumName(rule.logic, LOGIC_NAME, 'AND'),
+        HOLD: rule.hold_ms ?? legacyHold,
+        COOLDOWN: rule.cooldown_ms ??
+          ((rule.conditions || []).some(c => c.cooldown_ms != null) ? legacyCooldown : 2000),
+      },
       inputs: {
         ...(condBlock ? { CONDITIONS: { block: condBlock } } : {}),
         ...(actBlock  ? { ACTIONS:    { block: actBlock  } } : {}),
@@ -2527,13 +2624,11 @@ function _buildCondChain(conditions, uidByName) {
 
 function _buildCondBlock(cond, uidByName) {
   if (!cond) return null;
-  const { ref, op, threshold, hold_ms, cooldown_ms } = cond;
+  const { ref, op, threshold } = cond;
   const refType = ref?.type ?? 0;
   const fields = {
     OP:       _enumName(op, COND_OP_NAME, 'GT'),
     THRESHOLD: threshold ?? 0,
-    HOLD:     hold_ms ?? 0,
-    COOLDOWN: cooldown_ms ?? 2000,
   };
   const inputs = {};
 
@@ -2570,6 +2665,12 @@ function _buildActBlock(action, uidByName) {
   let cmdName = _enumName(cmd, ACT_NAME, '');
   const resolvedTarget = _resolveModuleId(target, uidByName);
   const cv = (i) => params?.[i]?.value ?? 0;
+  const lifecycleFields = {
+    MODE: _enumName(action.mode, ACTION_MODE_NAME, 'TRIGGER'),
+    DELAY: action.delay_ms ?? 0,
+    DURATION: action.duration_ms ?? 0,
+    UPDATE_INTERVAL: action.update_interval_ms ?? 50,
+  };
   // Helper: emit a literal field value when param is CONST, or a ref sub-block
   // via the *_REF input when param is SLOT/VC/VAR.
   const setRichParam = (i, fieldName, fields, inputs) => {
@@ -2592,7 +2693,7 @@ function _buildActBlock(action, uidByName) {
     if (cmdName !== 'LED_SOLID' && cmdName !== 'LED_OFF' && cmdName !== 'LED_STOP') {
       cmdName = 'LED_SOLID';
     }
-    const fields = { SLOT: String(resolvedTarget), CMD: cmdName };
+    const fields = { SLOT: String(resolvedTarget), CMD: cmdName, ...lifecycleFields };
     const inputs = {};
     if (cmdName !== 'LED_OFF' && cmdName !== 'LED_STOP') {
       setRichParam(0, 'R', fields, inputs);
@@ -2602,15 +2703,24 @@ function _buildActBlock(action, uidByName) {
     return { type: 'led_action', fields, inputs };
   }
   if (cmdName.startsWith('VIBRATE')) {
-    const fields = { SLOT: String(resolvedTarget), CMD: cmdName };
+    const fields = { SLOT: String(resolvedTarget), CMD: cmdName, ...lifecycleFields };
     if (cmdName !== 'VIBRATE_STOP') {
       fields.INTENSITY = cv(0);
-      fields.DURATION  = cv(1);
+      if (cmdName === 'VIBRATE_PULSE') {
+        fields.ON_MS = cv(1);
+        fields.OFF_MS = cv(2);
+        fields.COUNT = cv(3);
+      } else if (cmdName === 'VIBRATE_RAMP') {
+        fields.INTENSITY = cv(1);
+        fields.DURATION = action.duration_ms ?? 0;
+      } else {
+        fields.DURATION = action.duration_ms ?? cv(1);
+      }
     }
     return { type: 'vibrate_action', fields };
   }
   if (cmdName.startsWith('AUDIO')) {
-    const fields = { SLOT: String(resolvedTarget), CMD: cmdName };
+    const fields = { SLOT: String(resolvedTarget), CMD: cmdName, ...lifecycleFields };
     const inputs = {};
     if (cmdName !== 'AUDIO_STOP') {
       setRichParam(0, 'FREQ', fields, inputs);

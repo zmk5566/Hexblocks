@@ -605,17 +605,17 @@ Do not put the only explanation inside the JSON or inside the XML tag; the UI hi
 the envelope and only the visible prose can teach the user or show clickable module
 chips. Example format:
 
-<workspace_update>{"version":3,"variables":[],"virtual_channels":[],"rules":[...]}</workspace_update>
+<workspace_update>{"version":4,"variables":[],"virtual_channels":[],"rules":[...]}</workspace_update>
 
-## Full ECA Schema (version 3)
+## Full ECA Schema (version 4)
 
 \`\`\`
 {
-  "version": 3,
+  "version": 4,
   "variables": [0.0, 0.0, ...],          // up to 8 floats; index = var_id (0..7)
   "virtual_channels": [
     {
-      "vc_id": 0,                         // 0..15, used as ch when ref.type=2
+      "vc_id": 0,                         // 0..7, used as ch when ref.type=2
       "op": "ADD|SUB|MUL|DIV|ABS|NEG|MIN|MAX|MAP|CLAMP|DIFF",
       "a": { "type": 0|1|2|3, "id": "uid_hex_or_vc_or_var_id", "ch": int },
       "b": { "type": 0|1|2|3, "id": "...", "ch": int, "value": float },
@@ -624,13 +624,13 @@ chips. Example format:
   ],
   "rules": [
     {
+      "hold_ms": int,                     // whole rule must stay true this long
+      "cooldown_ms": int,                 // minimum interval between episodes
       "conditions": [
         {
           "ref": { "type": 0|1|2|3, "id": "uid_hex_or_id", "ch": int },
           "op": "GT|LT|GTE|LTE|EQ|NEQ",
-          "threshold": float,
-          "hold_ms": int,                 // condition must be true this long before firing
-          "cooldown_ms": int              // minimum interval between re-fires
+          "threshold": float
         }
       ],
       "logic": "AND|OR",
@@ -638,6 +638,10 @@ chips. Example format:
         {
           "target": "uid_hex",            // module UID for actuators; var_id for VAR_*
           "cmd": "ACTION_NAME",
+          "mode": "TRIGGER|WHILE_TRUE|STREAM",
+          "delay_ms": int,                 // non-blocking delay before start
+          "duration_ms": int,              // 0=until replaced/stopped; otherwise auto-stop
+          "update_interval_ms": int,       // STREAM only; 20..800 ms
           "params": [
             { "type": 0|1|2|3, "id": "...", "ch": 0, "value": float }
           ]
@@ -652,7 +656,7 @@ chips. Example format:
 
 - **type 0 (SLOT)**: physical sensor channel. \`id\` = module UID hex, \`ch\` = channel ID.
 - **type 1 (CONST)**: constant value. \`value\` = the number; \`id\`/\`ch\` ignored.
-- **type 2 (VC)**: virtual channel. \`id\` = vc_id (0..15), \`ch\` = 0.
+- **type 2 (VC)**: virtual channel. \`id\` = vc_id (0..7), \`ch\` = 0.
 - **type 3 (VAR)**: variable. \`id\` = var_id (0..7), \`ch\` = 0.
 
 ## Virtual Channel ops
@@ -685,9 +689,9 @@ LED (target = LED module uid):
 - **LED_STOP**: 0 params
 
 Vibration (target = vibration module uid):
-- **VIBRATE**: 2 params [intensity 0-100, duration_ms]
+- **VIBRATE**: 1 param [intensity 0-100]; use action duration_ms
 - **VIBRATE_PULSE**: 4 params [intensity, on_ms, off_ms, count]
-- **VIBRATE_RAMP**: 3 params [from%, to%, duration_ms]
+- **VIBRATE_RAMP**: 2 params [from%, to%]; use action duration_ms
 - **VIBRATE_STOP**: 0 params
 
 Audio (target = audio module uid):
@@ -712,9 +716,14 @@ Use this for theremin-like demos and dynamic feedback.
 
 ## Timing semantics
 
-- \`hold_ms\`: condition must remain true for at least this many ms before firing (debounce).
-- \`cooldown_ms\`: minimum interval before the next eligible firing. Constant actions fire once per false→true episode; actions with live sensor/VC/VAR params may refresh while the condition stays true.
-- Defaults: hold_ms=0 (instant), cooldown_ms=2000 (2s) is a sensible starting point.
+- Rule \`hold_ms\`: all conditions must remain true for this long before the episode starts.
+- Rule \`cooldown_ms\`: minimum interval between eligible false→true episodes.
+- Action \`delay_ms\` and \`duration_ms\` are cooperative timers; they never block sensor, CAN, LED, vibration, or audio processing.
+- \`TRIGGER\`: start once per false→true episode. A pending delayed action still starts even if a one-shot event has already disappeared.
+- \`WHILE_TRUE\`: start after delay and stop immediately when the rule becomes false.
+- \`STREAM\`: like WHILE_TRUE, but refresh dynamic params no faster than \`update_interval_ms\`. Use only when params reference sensors, VCs, or variables.
+- For transient event channels (SHAKE, STEP, FREEFALL, HR_HIGH, HR_SPIKE), keep rule hold_ms=0 because the event may exist for only one tick.
+- Defaults: hold_ms=0, cooldown_ms=2000, mode=TRIGGER, delay_ms=0, duration_ms=0, update_interval_ms=50.
 
 ## Channel IDs (for reference)
 

@@ -6,7 +6,8 @@
 #define WB_DESC_MAX_CAPABILITIES 4
 #define WB_DESC_MAX_AFFORDANCES 6
 #define WB_DESC_MAX_PLACEMENTS 6
-#define WB_DESC_MAX_SERIALIZED 512
+#define WB_DESC_MAX_CONFIG_FIELDS 4
+#define WB_DESC_MAX_SERIALIZED 768
 
 // --- ROS-inspired Capability Description ---
 struct WBCapability {
@@ -36,6 +37,13 @@ struct WBPhysical {
     char placements[WB_DESC_MAX_PLACEMENTS][16];  // Suitable body locations
 };
 
+struct WBConfigField {
+    char key[16];           // "transport_mode", "sample_rate", ...
+    char type[12];          // "enum", "bool", "int", "float", "string"
+    char defaultValue[32];  // compact string form
+    char label[32];         // UI / LLM friendly label
+};
+
 // --- Full Module Descriptor (ROS-inspired) ---
 struct WearBlocksDescriptor {
     // Identity
@@ -58,6 +66,12 @@ struct WearBlocksDescriptor {
 
     // Physical properties
     WBPhysical physical;
+
+    // Mutable module configuration schema. This describes supported knobs
+    // and defaults; current config values are queried/set separately and
+    // stored in the module's own NVS.
+    uint8_t numConfigFields;
+    WBConfigField configFields[WB_DESC_MAX_CONFIG_FIELDS];
 
     // Serialization
     uint16_t serialize(uint8_t* buffer, uint16_t maxLen) const;

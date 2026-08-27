@@ -1,5 +1,5 @@
 /*
- * WearBlocks Module — Audio Synth (MAX98357A I2S amp), v1
+ * WearBlocks Module — Audio Synth (MAX98357A I2S amp), v2
  * Target: ESP32-C3-MINI-1
  * Actuator: MAX98357A on I2S (BCLK=GPIO5, LRC=GPIO3, DIN=GPIO4)
  *
@@ -8,7 +8,7 @@
  *
  * Capability: actuator/audio_synth, axes=2 (freq, amp).
  * Commands:
- *   ACT_AUDIO_SET_TONE (0x30) — 3 params: freq_lo, freq_hi (uint16 LE Hz), amp (0..255)
+ *   ACT_AUDIO_SET_TONE (0x30) — freq_lo, freq_hi, amp, optional duration_u32_be
  *   ACT_AUDIO_STOP    (0x31) — 0 params
  *
  * Mirrors module_led v3 for CAN/descriptor/HELLO/ACK and child detect.
@@ -53,7 +53,7 @@ WearBlocksProtocol   protocol;
 WearBlocksDescriptor descriptor;
 WBModule             module(can, protocol, descriptor);
 
-static const char FW_VERSION[] = "1.0";
+static const char FW_VERSION[] = "2.0";
 
 SineWaveGenerator<int16_t>      sine(0);
 GeneratedSoundStream<int16_t>   src(sine);
@@ -155,6 +155,17 @@ void setupDescriptor() {
 static float    g_lastFreq = -1.0f;
 static int16_t  g_lastAmp  = -1;
 static const float FREQ_DEADBAND_HZ = 1.0f;
+static bool     g_toneTimed = false;
+static uint32_t g_toneUntil = 0;
+
+void stopTone() {
+    g_toneTimed = false;
+    if (g_lastAmp != 0) {
+        sine.setAmplitude(0);
+        g_lastAmp = 0;
+        Serial.println("[AMP] STOP");
+    }
+}
 
 void onActuatorCmd(uint8_t cmd, const uint8_t* p, uint8_t pLen) {
     if (cmd == ACT_AUDIO_SET_TONE) {
@@ -174,14 +185,21 @@ void onActuatorCmd(uint8_t cmd, const uint8_t* p, uint8_t pLen) {
             g_lastAmp = amp;
             Serial.printf("[AMP] amp=%u\n", amp);
         }
+        if (pLen >= 7) {
+            uint32_t duration = ((uint32_t)p[3] << 24) |
+                                ((uint32_t)p[4] << 16) |
+                                ((uint32_t)p[5] << 8) | p[6];
+            uint32_t lease = (pLen >= 8) ? (uint32_t)p[7] * 10U : 0;
+            uint32_t timeout = lease > 0 ? lease : duration;
+            g_toneTimed = timeout > 0;
+            g_toneUntil = millis() + timeout;
+        } else {
+            g_toneTimed = false;
+        }
         return;
     }
     if (cmd == ACT_AUDIO_STOP) {
-        if (g_lastAmp != 0) {
-            sine.setAmplitude(0);
-            g_lastAmp = 0;
-            Serial.println("[AMP] STOP");
-        }
+        stopTone();
         return;
     }
     Serial.printf("[AMP] unknown cmd=0x%02X (ignored)\n", cmd);
@@ -237,6 +255,7 @@ void setup() {
 // ── Loop ──────────────────────────────────────────────────────
 void loop() {
     module.tick();
+    if (g_toneTimed && (int32_t)(millis() - g_toneUntil) >= 0) stopTone();
     copier.copy();
 #if CHILD_DETECT
     scanChildren();

@@ -7,7 +7,7 @@ const LED_UID = 'FACE0005';
 const c = (value) => ({ type: REF.CONST, id: 0, ch: 0, value });
 
 const rules = {
-  version: 3,
+  version: 4,
   variables: [],
   virtual_channels: [
     // vc0 := DIFF(imu.ax)  → one-sample derivative
@@ -22,11 +22,13 @@ const rules = {
       c_const: 100 },
   ],
   rules: [{
+    hold_ms: 200,
+    cooldown_ms: 1000,
     conditions: [
       { ref: { type: REF.VC, id: 0, ch: 0 },
-        op: 'GT', threshold: 0.8, hold_ms: 0, cooldown_ms: 500 },
+        op: 'GT', threshold: 0.8 },
       { ref: { type: REF.VC, id: 1, ch: 0 },
-        op: 'GT', threshold: 0.5, hold_ms: 200, cooldown_ms: 1000 },
+        op: 'GT', threshold: 0.5 },
     ],
     logic: 'AND',
     actions: [{ target: LED_UID, cmd: 'LED_BREATHE',

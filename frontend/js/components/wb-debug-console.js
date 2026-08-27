@@ -128,6 +128,7 @@ export class WbDebugConsole extends LitElement {
     .log .k-ack-err.msg { color: var(--wb-danger); font-weight: 600; }
     .log .k-log    .msg { color: var(--wb-text); }
     .log .k-topo   .msg { color: #7CA1BB; }
+    .log .k-wireless .msg { color: var(--wb-accent); }
     .log .k-done   .msg { color: var(--wb-text-dim); }
 
     .controls {
@@ -209,6 +210,12 @@ export class WbDebugConsole extends LitElement {
     const d = new Date();
     const pad = (n, w = 2) => String(n).padStart(w, '0');
     return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
+  }
+
+  _maskSecret(value) {
+    const s = String(value || '');
+    if (s.length <= 4) return s ? '****' : '(empty)';
+    return `${s.slice(0, 2)}...${s.slice(-2)}`;
   }
 
   _handleMessage(msg) {
@@ -310,6 +317,33 @@ export class WbDebugConsole extends LitElement {
         this._pushEvent(kind, `${tag} ${msg.text || ''}`);
         break;
       }
+      case 'link_state': {
+        const { uid } = msg;
+        const next = new Map(this._modules);
+        next.set(uid, {
+          ...(next.get(uid) || {}),
+          link: msg.active_link,
+          mode: msg.transport_mode,
+          topology: msg.topology_state,
+        });
+        this._modules = next;
+        const endpoint = msg.ip ? ` ${msg.ip}:${msg.port || 0}` : '';
+        this._pushEvent('wireless',
+          `$W uid=${sh(uid)} link=${msg.active_link || '?'} mode=${msg.transport_mode || '?'} topo=${msg.topology_state || '?'}${endpoint}`);
+        break;
+      }
+      case 'wifi_ap':
+        this._pushEvent('wireless',
+          `$WIFI AP ${msg.ssid || '?'} ${msg.ip || '0.0.0.0'}:${msg.port || 0}`);
+        break;
+      case 'wifi_pass':
+        this._pushEvent('wireless',
+          `$WIFI PASS ${this._maskSecret(msg.password)}`);
+        break;
+      case 'wifi_token':
+        this._pushEvent('wireless',
+          `$WIFI TOKEN ${this._maskSecret(msg.token)}`);
+        break;
       case 'query_done':
         this._pushEvent('done', '$Q DONE');
         break;

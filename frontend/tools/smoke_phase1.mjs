@@ -5,7 +5,7 @@
 //   python -c "import base64; from bridge.wb_eca import ECAEngine; e=ECAEngine(); \
 //              e.load_program(base64.b64decode(open('/tmp/b64.txt').read().strip()))"
 //
-// NB: v3 bytecode refs are UID-keyed. The hub resolves UID → current CAN slot
+// NB: v4 bytecode refs are UID-keyed. The hub resolves UID → current CAN slot
 // at runtime, so these examples use stable synthetic UIDs from the simulator.
 
 import { encodeProgram, programToBase64, REF } from '../js/eca-encoder.js';
@@ -27,11 +27,12 @@ function dump(name, rules) {
 
 // (1) UID-keyed SLOT ref, hold_ms = 0.
 dump('uid_ref_led', {
-  version: 3, variables: [], virtual_channels: [],
+  version: 4, variables: [], virtual_channels: [],
   rules: [{
+    hold_ms: 0, cooldown_ms: 2000,
     conditions: [{
       ref: { type: REF.SLOT, id: IMU_UID, ch: 0 },
-      op: 'GT', threshold: 0.5, hold_ms: 0, cooldown_ms: 2000,
+      op: 'GT', threshold: 0.5,
     }],
     logic: 'AND',
     actions: [{ target: LED_UID, cmd: 'LED_SOLID',
@@ -41,24 +42,27 @@ dump('uid_ref_led', {
 
 // (2) New: VAR ref + hold_ms (Phase 1 capability).
 dump('var_ref_with_hold', {
-  version: 3, variables: [], virtual_channels: [],
+  version: 4, variables: [], virtual_channels: [],
   rules: [{
+    hold_ms: 250, cooldown_ms: 1000,
     conditions: [{
       ref: { type: REF.VAR, id: 3, ch: 0 },
-      op: 'GTE', threshold: 1.0, hold_ms: 250, cooldown_ms: 1000,
+      op: 'GTE', threshold: 1.0,
     }],
     logic: 'AND',
-    actions: [{ target: VIB_UID, cmd: 'VIBRATE', params: [c(80), c(300)] }],
+    actions: [{ target: VIB_UID, cmd: 'VIBRATE', duration_ms: 300,
+                params: [c(80)] }],
   }],
 });
 
 // (3) New: VC ref.
 dump('vc_ref', {
-  version: 3, variables: [], virtual_channels: [],
+  version: 4, variables: [], virtual_channels: [],
   rules: [{
+    hold_ms: 0, cooldown_ms: 500,
     conditions: [{
       ref: { type: REF.VC, id: 2, ch: 0 },
-      op: 'LT', threshold: -0.25, hold_ms: 0, cooldown_ms: 500,
+      op: 'LT', threshold: -0.25,
     }],
     logic: 'AND',
     actions: [{ target: LED_UID, cmd: 'LED_OFF', params: [] }],
@@ -67,11 +71,12 @@ dump('vc_ref', {
 
 // (4) New: CONST ref (lhs = const, threshold carries value).
 dump('const_ref', {
-  version: 3, variables: [], virtual_channels: [],
+  version: 4, variables: [], virtual_channels: [],
   rules: [{
+    hold_ms: 0, cooldown_ms: 0,
     conditions: [{
       ref: { type: REF.CONST, id: 0, ch: 0 },
-      op: 'EQ', threshold: 3.14, hold_ms: 0, cooldown_ms: 0,
+      op: 'EQ', threshold: 3.14,
     }],
     logic: 'AND',
     actions: [{ target: LED_UID, cmd: 'LED_OFF', params: [] }],

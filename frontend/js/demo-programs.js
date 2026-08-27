@@ -28,13 +28,13 @@ export const DEMO_D1 = {
       {
         type: 'eca_rule',
         x: 20, y: 20,
-        fields: { LOGIC: 'AND' },
+        fields: { LOGIC: 'AND', HOLD: 0, COOLDOWN: 1000 },
         inputs: {
           CONDITIONS: { block: {
             type: 'sensor_condition',
             fields: {
               SLOT: LIGHT_SLOT, CHANNEL: String(CH.LIGHT),
-              OP: 'LT', THRESHOLD: 0.3, COOLDOWN: 1000, HOLD: 0,
+              OP: 'LT', THRESHOLD: 0.3,
             },
           }},
           ACTIONS: { block: {
@@ -49,13 +49,13 @@ export const DEMO_D1 = {
       {
         type: 'eca_rule',
         x: 20, y: 220,
-        fields: { LOGIC: 'AND' },
+        fields: { LOGIC: 'AND', HOLD: 0, COOLDOWN: 1000 },
         inputs: {
           CONDITIONS: { block: {
             type: 'sensor_condition',
             fields: {
               SLOT: LIGHT_SLOT, CHANNEL: String(CH.LIGHT),
-              OP: 'GT', THRESHOLD: 0.5, COOLDOWN: 1000, HOLD: 0,
+              OP: 'GT', THRESHOLD: 0.5,
             },
           }},
           ACTIONS: { block: {
@@ -92,18 +92,21 @@ export const DEMO_D2 = {
       {
         type: 'eca_rule',
         x: 20, y: 200,
-        fields: { LOGIC: 'AND' },
+        fields: { LOGIC: 'AND', HOLD: 0, COOLDOWN: 100 },
         inputs: {
           CONDITIONS: { block: {
             type: 'sensor_condition',
             fields: {
               SLOT: LIGHT_SLOT, CHANNEL: String(CH.LIGHT),
-              OP: 'GTE', THRESHOLD: 0, COOLDOWN: 100, HOLD: 0,
+              OP: 'GTE', THRESHOLD: 0,
             },
           }},
           ACTIONS: { block: {
             type: 'audio_action',
-            fields: { SLOT: AUDIO_SLOT, CMD: 'AUDIO_SET_TONE', FREQ: 440, AMP: 180 },
+            fields: {
+              SLOT: AUDIO_SLOT, CMD: 'AUDIO_SET_TONE', FREQ: 440, AMP: 180,
+              MODE: 'STREAM', DELAY: 0, DURATION: 0, UPDATE_INTERVAL: 100,
+            },
             inputs: {
               FREQ_REF: { block: {
                 type: 'ref_vc',
@@ -127,23 +130,28 @@ export const DEMO_D3 = {
       {
         type: 'eca_rule',
         x: 20, y: 20,
-        fields: { LOGIC: 'AND' },
+        fields: { LOGIC: 'AND', HOLD: 0, COOLDOWN: 2000 },
         inputs: {
           CONDITIONS: { block: {
             type: 'sensor_condition',
             fields: {
               SLOT: IMU_SLOT, CHANNEL: String(CH.ACC_MAG),
-              OP: 'GT', THRESHOLD: 1.4, COOLDOWN: 2000, HOLD: 0,
+              OP: 'GT', THRESHOLD: 1.4,
             },
           }},
           ACTIONS: { block: {
             type: 'audio_action',
-            fields: { SLOT: AUDIO_SLOT, CMD: 'AUDIO_SET_TONE', FREQ: 880, AMP: 200 },
+            fields: {
+              SLOT: AUDIO_SLOT, CMD: 'AUDIO_SET_TONE', FREQ: 880, AMP: 200,
+              MODE: 'TRIGGER', DELAY: 0, DURATION: 300, UPDATE_INTERVAL: 50,
+            },
             next: { block: {
               type: 'led_action',
               fields: {
                 SLOT: LED_SLOT, CMD: 'LED_SOLID',
                 R: 255, G: 30, B: 30,
+                MODE: 'TRIGGER', DELAY: 0, DURATION: 300,
+                UPDATE_INTERVAL: 50,
               },
             }},
           }},

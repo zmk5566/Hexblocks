@@ -26,6 +26,7 @@
 #include <WearBlocksProtocol.h>
 #include <WearBlocksDescriptor.h>
 #include <WearBlocksModule.h>
+#include <WearBlocksWireless.h>
 #include <WearBlocksECA.h>
 
 // ── Pin assignment (ESP32-C3-MINI-1) ──────────────────────────
@@ -38,6 +39,7 @@ WearBlocksCAN        can;
 WearBlocksProtocol   protocol;
 WearBlocksDescriptor descriptor;
 WBModule             module(can, protocol, descriptor);
+WBWirelessModule     wireless(module, protocol, descriptor);
 
 static const char FW_VERSION[] = "3.0";
 
@@ -109,6 +111,7 @@ void setup() {
     Serial.printf("[LIGHT] uid=%08lX\n", (unsigned long)module.uid());
 
     module.onAfterAck(onRegistered);
+    wireless.begin();
 
     pinMode(LIGHT_PIN, INPUT);
     // Prime LPF with one read so the first publish reflects reality, not 0.
@@ -124,16 +127,17 @@ void setup() {
 // ── Loop ──────────────────────────────────────────────────────
 void loop() {
     module.tick();
+    wireless.tick();
 
     uint32_t now = millis();
 
-    if (module.registered() && (now - lastSendMs) >= LIGHT_MIN_INTERVAL) {
+    if (wireless.runtimeReady() && (now - lastSendMs) >= LIGHT_MIN_INTERVAL) {
         int raw = analogRead(LIGHT_PIN);
         float norm = raw / 4095.0f;
         lightLpf = lightLpf + LIGHT_LPF_ALPHA * (norm - lightLpf);
 
         if (fabsf(lightLpf - lastSentNorm) >= LIGHT_DEADBAND) {
-            protocol.sendSensorChannel(WB_CH_LIGHT, lightLpf);
+            wireless.sendSensorChannel(WB_CH_LIGHT, lightLpf);
             lastSentNorm = lightLpf;
             lastSendMs = now;
         }
