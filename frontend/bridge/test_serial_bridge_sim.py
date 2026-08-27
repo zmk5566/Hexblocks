@@ -131,6 +131,12 @@ def test_builtin_motor_wire_identity_keeps_face_zero_internal(monkeypatch):
     assert msg["slot"] is None
 
 
+def test_wired_hub_disables_wifi_capability():
+    assert serial_bridge.parse_line("$WIFI,DISABLED") == {
+        "type": "wifi_disabled",
+    }
+
+
 def test_light_sim_payload_uses_light_field(monkeypatch):
     monkeypatch.setattr(serial_bridge, "_noise", lambda scale=0.01: 0.0)
 

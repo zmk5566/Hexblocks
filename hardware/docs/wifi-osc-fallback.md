@@ -3,6 +3,15 @@
 Status: first end-to-end implementation for simple sensor modules
 (`module_resistor` and `module_light_resistor`).
 
+This runtime belongs to the explicit `hardware/firmware/wifi_hub` build. The
+default `hardware/firmware/hub` build shares the same CAN/BLE/USB/ECA core but
+does not include Wi-Fi, create a SoftAP, or listen for OSC/UDP packets.
+
+```bash
+arduino-cli compile --fqbn esp32:esp32:esp32c3 \
+  --libraries hardware/firmware/lib hardware/firmware/wifi_hub
+```
+
 The reference system still treats CAN as the deterministic local module bus,
 but each module can carry a transport policy. The hub can run a WPA2 SoftAP and
 accept OSC-over-UDP packets from Wi-Fi modules. ECA execution remains on the
