@@ -620,7 +620,7 @@ export class WbApp extends LitElement {
         const key = uid ?? msg.slot;
         if (key == null) break;
         const next = new Map(this._actuatorByUid);
-        next.set(key, { led: msg.led, vib: msg.vib });
+        next.set(key, { led: msg.led, vib: msg.vib, audio: msg.audio });
         this._actuatorByUid = next;
         break;
       }

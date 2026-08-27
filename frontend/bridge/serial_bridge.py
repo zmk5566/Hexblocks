@@ -19,7 +19,7 @@ from pathlib import Path
 import serial
 import websockets
 
-from wb_eca import ECAEngine, Act, CH, Action as EcaAction
+from wb_eca import ECAEngine, Act, ActionMode, CH, Action as EcaAction
 from logger_profile import (
     MAX_SUBSCRIPTIONS as LOGGER_MAX_SUBSCRIPTIONS,
     MODES as LOGGER_MODES,
@@ -296,6 +296,11 @@ SIM_CHANNEL_MAP = {
     "knob": {"knob": CH.KNOB},
     "light": {"light": CH.LIGHT},
 }
+
+
+def _sim_monotonic_ms() -> int:
+    """Monotonic clock for simulator scheduling; wall-clock jumps are irrelevant."""
+    return time.monotonic_ns() // 1_000_000
 
 # One global engine. The on_action callback is set later (after dispatch_action
 # is defined) to avoid forward-reference noise.
@@ -1753,8 +1758,11 @@ class SimModule:
         # Actuator runtime state (only meaningful for LED/VIB modules; harmless
         # to carry on sensors). until_ms == 0 means "no expiry scheduled".
         self.led = {"r": 0, "g": 0, "b": 0, "brightness": 0,
-                    "mode": "off", "until_ms": 0}
-        self.vib = {"intensity": 0, "mode": "off", "until_ms": 0}
+                    "mode": "off", "until_ms": 0, "_deadline_ms": 0}
+        self.vib = {"intensity": 0, "mode": "off", "until_ms": 0,
+                    "_deadline_ms": 0}
+        self.audio = {"frequency_hz": 0, "amplitude": 0, "mode": "off",
+                      "until_ms": 0, "_deadline_ms": 0}
         # One-shot sensor spike: {channel_id: (override_value, expires_ms)}.
         # Consumed by sim_sensor_data via _spike_override; auto-cleared.
         self.spikes: dict[int, tuple[float, int]] = {}
@@ -1786,7 +1794,7 @@ class SimModule:
             return
         # Apply any one-shot spike overrides. A spike replaces the generator
         # output for a single channel until its expiry time passes.
-        now_ms = int(time.time() * 1000)
+        now_ms = _sim_monotonic_ms()
         ch_map = SIM_CHANNEL_MAP.get(self.data_type, {})
         if self.spikes:
             # Reverse lookup channel_id → data key so spikes can target CH.AX
@@ -1976,7 +1984,8 @@ def dispatch_action(act: EcaAction) -> None:
         print(f"  [sim] ECA action for empty slot {target_slot} — ignored")
         return
     cmd = act.cmd
-    now_ms = int(time.time() * 1000)
+    now_ms = _sim_monotonic_ms()
+    wall_ms = int(time.time() * 1000)
     vals = act.vals or []
 
     def vget(i: int, default: float = 0.0) -> float:
@@ -1985,36 +1994,62 @@ def dispatch_action(act: EcaAction) -> None:
     def vbyte(i: int) -> int:
         return max(0, min(255, int(vget(i) + 0.5)))
 
+    def deadlines(duration_ms: int) -> dict:
+        if act.mode == ActionMode.STREAM:
+            duration_ms = max(100, min(2550, act.update_interval_ms * 3))
+        duration_ms = max(0, duration_ms)
+        return {
+            "until_ms": wall_ms + duration_ms if duration_ms > 0 else 0,
+            "_deadline_ms": now_ms + duration_ms if duration_ms > 0 else 0,
+        }
+
     # ── LED commands ───────────────────────────────
     if cmd in (Act.LED_OFF, Act.LED_STOP):
         mod.led = {"r": 0, "g": 0, "b": 0, "brightness": 0,
-                   "mode": "off", "until_ms": 0}
+                   "mode": "off", "until_ms": 0, "_deadline_ms": 0}
     elif cmd == Act.LED_SOLID:
-        # 3 params: R, G, B (each 0..255). No duration in v2 — SOLID is
-        # set-and-hold; subsequent SOLID/OFF replaces it.
+        # 3 params: R, G, B. Lifecycle duration is carried separately in v4.
         mod.led = {"r": vbyte(0), "g": vbyte(1), "b": vbyte(2),
-                   "brightness": 255, "mode": "solid", "until_ms": 0}
+                   "brightness": 255, "mode": "solid",
+                   **deadlines(act.duration_ms)}
     elif cmd in (Act.LED_BLINK, Act.LED_BREATHE, Act.LED_RAMP, Act.LED_RAINBOW):
         # Reserved — module_led v3 doesn't implement these. Treat as SOLID
         # with the first 3 params (forward-compatible passthrough).
         mod.led = {"r": vbyte(0), "g": vbyte(1), "b": vbyte(2),
-                   "brightness": 255, "mode": "solid", "until_ms": 0}
+                   "brightness": 255, "mode": "solid",
+                   **deadlines(act.duration_ms)}
 
     # ── Vibration commands ─────────────────────────
     elif cmd == Act.VIBRATE:
         intensity = vbyte(0)
-        dur_ms = max(0, int(vget(1) + 0.5))
+        dur_ms = act.duration_ms or max(0, int(vget(1) + 0.5))
         mod.vib = {"intensity": intensity, "mode": "on",
-                   "until_ms": (now_ms + dur_ms) if dur_ms > 0 else 0}
+                   **deadlines(dur_ms)}
     elif cmd == Act.VIBRATE_PULSE:
         intensity = vbyte(0)
-        on_10ms = vbyte(1); off_10ms = vbyte(2); count = vbyte(3) or 1
-        total = (on_10ms + off_10ms) * 10 * max(1, count)
+        on_ms = max(1, int(vget(1, 100) + 0.5))
+        off_ms = max(0, int(vget(2, 100) + 0.5))
+        count = vbyte(3) or 1
+        total = act.duration_ms or ((on_ms + off_ms) * max(1, count))
         mod.vib = {"intensity": intensity, "mode": "pulse",
-                   "on_ms": on_10ms * 10, "off_ms": off_10ms * 10,
-                   "count": count, "until_ms": now_ms + total}
+                   "on_ms": on_ms, "off_ms": off_ms, "count": count,
+                   **deadlines(total)}
+    elif cmd == Act.VIBRATE_RAMP:
+        total = act.duration_ms
+        mod.vib = {"intensity": vbyte(1), "from": vbyte(0), "mode": "ramp",
+                   **deadlines(total)}
     elif cmd == Act.VIBRATE_STOP:
-        mod.vib = {"intensity": 0, "mode": "off", "until_ms": 0}
+        mod.vib = {"intensity": 0, "mode": "off", "until_ms": 0,
+                   "_deadline_ms": 0}
+
+    # ── Audio commands ─────────────────────────────
+    elif cmd == Act.AUDIO_SET_TONE:
+        mod.audio = {"frequency_hz": max(0, min(65535, int(vget(0) + 0.5))),
+                     "amplitude": vbyte(1), "mode": "tone",
+                     **deadlines(act.duration_ms)}
+    elif cmd == Act.AUDIO_STOP:
+        mod.audio = {"frequency_hz": 0, "amplitude": 0, "mode": "off",
+                     "until_ms": 0, "_deadline_ms": 0}
 
     print(f"  [sim] ECA fired: target_uid={uid_hex} (slot={target_slot}) cmd={cmd}")
 
@@ -2022,7 +2057,7 @@ def dispatch_action(act: EcaAction) -> None:
 # Bind the engine to the dispatcher now that dispatch_action exists.
 eca._on_action = dispatch_action
 
-# v3 ECA bytecode is uid-keyed; the engine asks back via this hook to
+# v4 ECA bytecode is uid-keyed; the engine asks back via this hook to
 # translate uid (u32) → sim slot for sensor cache lookups inside SLOT refs.
 # Same shape as the real hub's registry.findByUid().
 def _sim_uid_to_slot(uid_u32: int) -> int:
@@ -2095,8 +2130,11 @@ def _parse_sim_command(line: str) -> None:
             # Reset all actuators when program cleared.
             for s, m in sim_modules.items():
                 m.led = {"r": 0, "g": 0, "b": 0, "brightness": 0,
-                         "mode": "off", "until_ms": 0}
-                m.vib = {"intensity": 0, "mode": "off", "until_ms": 0}
+                         "mode": "off", "until_ms": 0, "_deadline_ms": 0}
+                m.vib = {"intensity": 0, "mode": "off", "until_ms": 0,
+                         "_deadline_ms": 0}
+                m.audio = {"frequency_hz": 0, "amplitude": 0, "mode": "off",
+                           "until_ms": 0, "_deadline_ms": 0}
             asyncio.create_task(_ack("cleared"))
             print("  [sim] ECA cleared")
         elif line.startswith("$A "):
@@ -2116,7 +2154,7 @@ def _parse_sim_command(line: str) -> None:
             # $A's free-form params are positional bytes — wrap each as a
             # CONST-typed action param so the float-resolving dispatch path
             # gives the same byte values as the legacy raw-bytes path.
-            # v3 actions take a u32 target (uid). _resolve_sim_target() above
+            # v4 actions take a u32 target (uid). _resolve_sim_target() above
             # already gave us the sim slot; we look up its uid here.
             from wb_eca import ActionParam, REF as _REF
             mod = sim_modules.get(slot)
@@ -2686,7 +2724,7 @@ async def sim_command_handler(cmd_queue: asyncio.Queue):
                     print(f"  [sim] spike: bad duration: {tokens[4]}")
                     continue
             ch_id = int(ch_map[ch_name])
-            until = int(time.time() * 1000) + duration_ms
+            until = _sim_monotonic_ms() + duration_ms
             mod.spikes[ch_id] = (value, until)
             print(f"  [sim] ⚡ spike slot={slot} {ch_name}={value} for {duration_ms}ms")
         elif cmd == "clear":
@@ -2713,8 +2751,8 @@ async def sim_data_loop():
     last_broadcast: dict[int, dict] = {}  # slot → last actuator snapshot we sent
 
     while True:
-        now = time.time()
-        now_ms = int(now * 1000)
+        now = time.monotonic()
+        now_ms = _sim_monotonic_ms()
 
         # 1. Emit sensor frames at each module's native rate.
         for slot, mod in list(sim_modules.items()):
@@ -2731,20 +2769,30 @@ async def sim_data_loop():
 
         # 3. Auto-expire actuator state and broadcast diffs.
         for slot, mod in list(sim_modules.items()):
-            led_until = mod.led.get("until_ms", 0)
+            led_until = mod.led.get("_deadline_ms", 0)
             if led_until and now_ms >= led_until:
                 mod.led = {"r": 0, "g": 0, "b": 0, "brightness": 0,
-                           "mode": "off", "until_ms": 0}
-            vib_until = mod.vib.get("until_ms", 0)
+                           "mode": "off", "until_ms": 0, "_deadline_ms": 0}
+            vib_until = mod.vib.get("_deadline_ms", 0)
             if vib_until and now_ms >= vib_until:
-                mod.vib = {"intensity": 0, "mode": "off", "until_ms": 0}
-            snapshot = {"led": dict(mod.led), "vib": dict(mod.vib)}
+                mod.vib = {"intensity": 0, "mode": "off", "until_ms": 0,
+                           "_deadline_ms": 0}
+            audio_until = mod.audio.get("_deadline_ms", 0)
+            if audio_until and now_ms >= audio_until:
+                mod.audio = {"frequency_hz": 0, "amplitude": 0, "mode": "off",
+                             "until_ms": 0, "_deadline_ms": 0}
+            snapshot = {
+                "led": {k: v for k, v in mod.led.items() if not k.startswith("_")},
+                "vib": {k: v for k, v in mod.vib.items() if not k.startswith("_")},
+                "audio": {k: v for k, v in mod.audio.items() if not k.startswith("_")},
+            }
             if last_broadcast.get(slot) != snapshot:
                 last_broadcast[slot] = snapshot
                 await broadcast({"type": "actuator_state",
                                  "uid": mod.uid, "slot": slot,
                                  "led": snapshot["led"],
-                                 "vib": snapshot["vib"]})
+                                 "vib": snapshot["vib"],
+                                 "audio": snapshot["audio"]})
 
         # 4. Simulated LoRa base station ACKs queued logger batches.
         await _sim_logger_ack_tick(now_ms)

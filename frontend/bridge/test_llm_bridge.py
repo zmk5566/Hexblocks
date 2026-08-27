@@ -229,13 +229,13 @@ def test_sse_parse_simple():
 def test_sse_parse_workspace_update_tag():
     """workspace_update XML is present in full content and regex extractable."""
     import re
-    rules_json = '{"version":3,"variables":[],"virtual_channels":[],"rules":[]}'
+    rules_json = '{"version":4,"variables":[],"virtual_channels":[],"rules":[]}'
     response_text = f"Here is your rule.\n<workspace_update>{rules_json}</workspace_update>"
 
     match = re.search(r"<workspace_update>([\s\S]*?)</workspace_update>", response_text)
     assert match is not None
     parsed = json.loads(match.group(1).strip())
-    assert parsed["version"] == 3
+    assert parsed["version"] == 4
     assert "rules" in parsed
 
 

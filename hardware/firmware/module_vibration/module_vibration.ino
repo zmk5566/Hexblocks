@@ -3,13 +3,11 @@
  * Target: ESP32-C3-MINI-1
  * Actuator: ERM motor via DRV2605L haptic driver
  *
- * CONFIG+EXECUTE two-frame protocol:
- *   CONFIG (0x300+slot): [intensity(0-100)]
- *   EXECUTE (0x200+slot): [cmd, ...time_params]
+ * Inline EXECUTE protocol (all behaviors are non-blocking):
  *
  * Supported behaviors:
- *   ACT_VIBRATE       — single buzz (cfg: intensity, exe: dur_ms)
- *   ACT_VIBRATE_PULSE — repeated on/off (cfg: intensity, exe: on,off,count)
+ *   ACT_VIBRATE       — [intensity, duration_u32_be]
+ *   ACT_VIBRATE_PULSE — [intensity, on_10ms, off_10ms, count]
  *   ACT_VIBRATE_RAMP  — intensity ramp (exe: from%,to%,dur)
  *   ACT_VIBRATE_STOP  — immediate stop
  *
@@ -20,6 +18,7 @@
 #include <WearBlocksCAN.h>
 #include <WearBlocksProtocol.h>
 #include <WearBlocksDescriptor.h>
+#include <WearBlocksModule.h>
 #include <WearBlocksECA.h>
 #include <Wire.h>
 #include <Adafruit_DRV2605.h>
@@ -49,13 +48,10 @@ const ChildFacePin CHILD_PINS[3] = {
 WearBlocksCAN        can;
 WearBlocksProtocol   protocol;
 WearBlocksDescriptor descriptor;
+WBModule             module(can, protocol, descriptor);
 Adafruit_DRV2605     haptic;
 
-uint8_t mySlot = 4;
-bool    registered = false;
-uint32_t lastHello = 0;
-const uint32_t HELLO_RETRY_MS = 3000;   // re-announce every 3 s until ACK'd
-static const char FW_VERSION[] = "2.0";
+static const char FW_VERSION[] = "3.0";
 
 // ── CONFIG state ────────────────────────────────────────────
 uint8_t cfgIntensity = 80;
@@ -64,8 +60,9 @@ uint8_t cfgIntensity = 80;
 enum VibState : uint8_t { VIB_IDLE, VIB_BUZZ, VIB_PULSE, VIB_RAMP };
 VibState vibState = VIB_IDLE;
 uint32_t vibStart = 0;
+uint32_t vibLeaseUntil = 0;
 
-uint16_t buzzDur = 0;
+uint32_t buzzDur = 0;
 
 uint16_t pulseOn = 0, pulseOff = 0;
 uint8_t  pulseCount = 0, pulsesDone = 0;
@@ -73,7 +70,7 @@ bool     pulseActive = false;
 uint32_t lastPulseToggle = 0;
 
 uint8_t  rampFrom = 0, rampTo = 100;
-uint16_t rampDur = 0;
+uint32_t rampDur = 0;
 
 // ── Child-presence debounce (Phase 2) ───────────────────────
 #if CHILD_DETECT
@@ -102,7 +99,7 @@ void scanChildren() {
             uint8_t myFaceWhereChildIs = CHILD_PINS[cursor].face;
             Serial.printf("[CHILD] my face %d → %s\n",
                           myFaceWhereChildIs, occ ? "OCCUPIED" : "empty");
-            if (registered) {
+            if (module.registered()) {
                 protocol.sendChildEvent(myFaceWhereChildIs, occ);
             }
         }
@@ -122,11 +119,14 @@ void motorOff() {
     haptic.setRealtimeValue(0);
     haptic.setMode(DRV2605_MODE_INTTRIG);
     vibState = VIB_IDLE;
+    vibLeaseUntil = 0;
 }
 
 // ── Descriptor ──────────────────────────────────────────────
 void setupDescriptor() {
-    strlcpy(descriptor.moduleId, "vib_v2", sizeof(descriptor.moduleId));
+    char uid[16];
+    snprintf(uid, sizeof(uid), "vib_%08lX", (unsigned long)module.uid());
+    strlcpy(descriptor.moduleId, uid, sizeof(descriptor.moduleId));
     strlcpy(descriptor.name, "Vibration Motor", sizeof(descriptor.name));
     strlcpy(descriptor.category, "haptic_output", sizeof(descriptor.category));
     strlcpy(descriptor.color, "#50C878", sizeof(descriptor.color));
@@ -163,11 +163,9 @@ void setupDescriptor() {
 }
 
 // ── Protocol callbacks ──────────────────────────────────────
-void onDescriptorRequested() { protocol.sendDescriptor(descriptor); }
-
-void onAck() {
-    registered = true;
-    Serial.println("[VIB] Registered!");
+void onRegistered(uint8_t slot, bool descriptorCached) {
+    Serial.printf("[VIB] Registered slot=%d uid=%08lX cached=%d\n",
+                  slot, (unsigned long)module.uid(), descriptorCached);
 }
 
 void onActuatorConfig(const uint8_t* params, uint8_t len) {
@@ -177,19 +175,29 @@ void onActuatorConfig(const uint8_t* params, uint8_t len) {
 
 void onActuatorCmd(uint8_t cmd, const uint8_t* p, uint8_t pLen) {
     vibStart = millis();
+    uint8_t lease10ms = 0;
+    if (cmd == ACT_VIBRATE && pLen >= 6) lease10ms = p[5];
+    else if (cmd == ACT_VIBRATE_PULSE && pLen >= 5) lease10ms = p[4];
+    else if (cmd == ACT_VIBRATE_RAMP && pLen >= 7) lease10ms = p[6];
+    vibLeaseUntil = lease10ms > 0 ? vibStart + (uint32_t)lease10ms * 10U : 0;
 
     switch ((WBActCmd)cmd) {
         case ACT_VIBRATE:
-            buzzDur = (pLen >= 2) ? ((p[0] << 8) | p[1]) : 200;
+            cfgIntensity = (pLen >= 1) ? min(p[0], (uint8_t)100) : cfgIntensity;
+            buzzDur = (pLen >= 5)
+                    ? ((uint32_t)p[1] << 24) | ((uint32_t)p[2] << 16) |
+                      ((uint32_t)p[3] << 8) | p[4]
+                    : 200;
             motorOn(cfgIntensity);
             vibState = VIB_BUZZ;
             Serial.printf("[VIB] BUZZ %dms @%d%%\n", buzzDur, cfgIntensity);
             break;
 
         case ACT_VIBRATE_PULSE:
-            pulseOn  = (pLen >= 1) ? p[0] * 10 : 100;
-            pulseOff = (pLen >= 2) ? p[1] * 10 : 100;
-            pulseCount = (pLen >= 3) ? p[2] : 3;
+            cfgIntensity = (pLen >= 1) ? min(p[0], (uint8_t)100) : cfgIntensity;
+            pulseOn  = (pLen >= 2) ? (uint16_t)p[1] * 10 : 100;
+            pulseOff = (pLen >= 3) ? (uint16_t)p[2] * 10 : 100;
+            pulseCount = (pLen >= 4) ? max((uint8_t)1, p[3]) : 3;
             pulsesDone = 0;
             pulseActive = true;
             lastPulseToggle = vibStart;
@@ -202,7 +210,10 @@ void onActuatorCmd(uint8_t cmd, const uint8_t* p, uint8_t pLen) {
         case ACT_VIBRATE_RAMP:
             rampFrom = (pLen >= 1) ? p[0] : 0;
             rampTo   = (pLen >= 2) ? p[1] : 100;
-            rampDur  = (pLen >= 4) ? ((p[2] << 8) | p[3]) * 100 : 1000;
+            rampDur = (pLen >= 6)
+                    ? ((uint32_t)p[2] << 24) | ((uint32_t)p[3] << 16) |
+                      ((uint32_t)p[4] << 8) | p[5]
+                    : 1000;
             motorOn(rampFrom);
             vibState = VIB_RAMP;
             Serial.printf("[VIB] RAMP %d→%d%% in %dms\n", rampFrom, rampTo, rampDur);
@@ -223,24 +234,29 @@ void tickBehavior() {
     if (vibState == VIB_IDLE) return;
 
     uint32_t now = millis();
+    if (vibLeaseUntil && (int32_t)(now - vibLeaseUntil) >= 0) {
+        motorOff();
+        return;
+    }
     uint32_t elapsed = now - vibStart;
 
     switch (vibState) {
         case VIB_BUZZ:
-            if (elapsed >= buzzDur) motorOff();
+            if (buzzDur > 0 && elapsed >= buzzDur) motorOff();
             break;
 
         case VIB_PULSE: {
             uint16_t interval = pulseActive ? pulseOn : pulseOff;
             if ((now - lastPulseToggle) >= interval) {
-                pulseActive = !pulseActive;
                 lastPulseToggle = now;
                 if (pulseActive) {
-                    motorOn(cfgIntensity);
                     pulsesDone++;
                     if (pulseCount > 0 && pulsesDone >= pulseCount) { motorOff(); return; }
-                } else {
                     haptic.setRealtimeValue(0);
+                    pulseActive = false;
+                } else {
+                    motorOn(cfgIntensity);
+                    pulseActive = true;
                 }
             }
             break;
@@ -250,7 +266,7 @@ void tickBehavior() {
             float t = min(1.0f, (float)elapsed / rampDur);
             uint8_t intensity = (uint8_t)(rampFrom + t * (rampTo - rampFrom));
             motorOn(intensity);
-            if (elapsed >= rampDur) vibState = VIB_IDLE;
+            if (elapsed >= rampDur) motorOff();
             break;
         }
         default:
@@ -266,20 +282,13 @@ void setup() {
     Serial.printf("=== WearBlocks Vibration Module v%s ===\n", FW_VERSION);
     Serial.printf ("MY_FACE=%d  CHILD_DETECT=%d\n", MY_FACE, CHILD_DETECT);
 
-    if (!can.begin(CAN_TX, CAN_RX)) {
+    if (!module.begin(CAN_TX, CAN_RX)) {
         Serial.println("[VIB] CAN init FAILED!");
         while (1) delay(1000);
     }
-    protocol.begin(can, false, mySlot);
-    protocol.onDescriptorRequested(onDescriptorRequested);
     protocol.onActuatorCommand(onActuatorCmd);
     protocol.onActuatorConfig(onActuatorConfig);
-    protocol.onAck(onAck);
-    protocol.onRediscover([]() {
-        Serial.println("[VIB] REDISCOVER received — re-sending HELLO");
-        protocol.sendHello(descriptor.moduleId, MY_FACE, 0);
-        lastHello = millis();
-    });
+    module.onAfterAck(onRegistered);
 
 #if CHILD_DETECT
     for (uint8_t i = 0; i < 3; i++) {
@@ -292,8 +301,7 @@ void setup() {
 #endif
 
     setupDescriptor();
-    protocol.sendHello(descriptor.moduleId, MY_FACE, 0);
-    lastHello = millis();
+    module.start();
 
     Wire.begin(I2C_SDA, I2C_SCL);
     if (!haptic.begin()) {
@@ -302,20 +310,14 @@ void setup() {
     haptic.selectLibrary(1);
     haptic.setMode(DRV2605_MODE_INTTRIG);
 
-    Serial.printf("[VIB] Ready — claimed face %d (hub will override)\n", MY_FACE);
+    Serial.printf("[VIB] Ready uid=%08lX\n", (unsigned long)module.uid());
 }
 
 void loop() {
-    protocol.processIncoming();
+    module.tick();
 #if CHILD_DETECT
     scanChildren();
 #endif
-
-    uint32_t now = millis();
-    if (!registered && now - lastHello >= HELLO_RETRY_MS) {
-        lastHello = now;
-        protocol.sendHello(descriptor.moduleId, MY_FACE, 0);
-    }
 
     tickBehavior();
     protocol.sendHeartbeat();

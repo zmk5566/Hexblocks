@@ -538,9 +538,11 @@ export class WbSensorPanel extends LitElement {
     const caps = this.module?.descriptor?.caps ?? [];
     const hasLed = caps.some(c => c.t === 'actuator' && (c.m || '').includes('light'));
     const hasVib = caps.some(c => c.t === 'actuator' && (c.m || '').includes('vibration'));
+    const hasAudio = caps.some(c => c.t === 'actuator' && (c.m || '').includes('audio'));
     const st = this.actuatorState || {};
     const led = st.led || { mode: 'off', r: 0, g: 0, b: 0, brightness: 0, until_ms: 0 };
     const vib = st.vib || { mode: 'off', intensity: 0, until_ms: 0 };
+    const audio = st.audio || { mode: 'off', frequency_hz: 0, amplitude: 0, until_ms: 0 };
     const now = Date.now();
 
     const ledOn = led.mode && led.mode !== 'off';
@@ -555,7 +557,10 @@ export class WbSensorPanel extends LitElement {
     const vibOn = vib.mode && vib.mode !== 'off';
     const vibRemaining = (vib.until_ms && vib.until_ms > now)
       ? Math.max(0, vib.until_ms - now) : 0;
-    const vibPct = Math.min(100, Math.round(((vib.intensity || 0) / 255) * 100));
+    const vibPct = Math.min(100, Math.round(vib.intensity || 0));
+    const audioOn = audio.mode && audio.mode !== 'off';
+    const audioRemaining = (audio.until_ms && audio.until_ms > now)
+      ? Math.max(0, audio.until_ms - now) : 0;
 
     return html`
       <div class="actuator-section">
@@ -582,6 +587,16 @@ export class WbSensorPanel extends LitElement {
               <span class="mode">${vib.mode || 'off'}</span>
               ${vibOn ? html` · ${vibPct}%` : ''}
               ${vibRemaining > 0 ? html` · ${vibRemaining}ms` : ''}
+            </div>
+          </div>
+        ` : ''}
+        ${hasAudio ? html`
+          <div class="actuator-card">
+            <div class="actuator-label">Audio</div>
+            <div class="led-meta">
+              <span class="mode">${audio.mode || 'off'}</span>
+              ${audioOn ? html` · ${audio.frequency_hz || 0}Hz · amp ${audio.amplitude || 0}` : ''}
+              ${audioRemaining > 0 ? html` · ${audioRemaining}ms` : ''}
             </div>
           </div>
         ` : ''}

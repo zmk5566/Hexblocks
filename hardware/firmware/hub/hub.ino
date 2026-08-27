@@ -2256,7 +2256,7 @@ void setup() {
     protocol.onSysConfigAck(onSysConfigAck);
 
     eca.begin(protocol);
-    // Wire ECA's UID→slot lookup to the registry so v3 bytecode (which
+    // Wire ECA's UID→slot lookup to the registry so v4 bytecode (which
     // carries module UIDs, not slots) can resolve refs at execute time.
     eca.setUidResolver([](uint32_t uid) -> uint8_t {
         // Only REGISTERED modules resolve to a usable slot. DETACHED and

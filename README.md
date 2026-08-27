@@ -122,6 +122,20 @@ The hub evaluates rules locally. A companion computer is only needed to author o
 
 4. **Author or replace the program (optional).** Run the bridge (see Mode B), open the browser UI, write rules in the Blockly canvas or via the LLM panel, and click upload. The encoded bytecode is sent as `$P <base64>` over the active transport, persisted in NVS, and runs on every boot until cleared with `$PC` (clear) or `$PE` (erase NVS).
 
+### ECA v4 timing model
+
+ECA timing is cooperative: the Hub never sleeps or busy-waits while a rule is delayed. `hold_ms` and `cooldown_ms` belong to the rule; each action independently has `delay_ms`, `duration_ms`, and one of three modes:
+
+- `TRIGGER`: starts once per rule episode. A delayed trigger remains scheduled after a one-tick event is consumed.
+- `WHILE_TRUE`: stays active only while the rule remains true.
+- `STREAM`: refreshes live sensor/VC/variable parameters at `update_interval_ms` (minimum 20 ms).
+
+Transient event channels such as shake, free-fall, and HR spike must use rule `hold_ms = 0`; use action `delay_ms` when the response should happen later.
+
+LED, vibration, and audio outputs use ownership tokens so an older duration timer cannot stop a newer effect on the same module. Stop, clear, and program replacement emit a safe output-specific stop. The output modules also enforce duration locally; `STREAM` commands renew a short lease, so a lost Hub/CAN connection expires the output without waiting for a final STOP frame.
+
+ECA v4 is a wire-format change. Reflash the Hub plus `module_led`, `module_vibration`, and `module_amplifier`, then upload the workspace again; the Hub intentionally uses a new `prog_v4` NVS key rather than interpreting stored v3 bytes.
+
 ## Quickstart - Sensor Stream + Browser
 
 Same hardware setup as Mode A. The hub keeps any uploaded program running; the bridge subscribes to the same `$S/$D/$H/$T` stream and forwards it to the browser. Clearing the program (`$PC`) gives a pure stream-only configuration.

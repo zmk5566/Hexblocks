@@ -6,7 +6,7 @@
 // version suffix is the safe way to invalidate stored programs that
 // would no longer parse under a new bytecode revision.
 static constexpr const char* kNvsNamespace = "wb-eca";
-static constexpr const char* kNvsKey       = "prog_v3";
+static constexpr const char* kNvsKey       = "prog_v4";
 
 static bool wbEcaIsTransientChannel(uint8_t channelId) {
     switch (channelId) {
@@ -28,6 +28,7 @@ static bool wbEcaIsTransientChannel(uint8_t channelId) {
 WearBlocksECA::WearBlocksECA()
     : _uidToSlot(nullptr),
       _actuatorDispatch(nullptr), _topicDispatch(nullptr),
+      _nextOwnerToken(0),
       _numVCs(0), _numRules(0), _running(false), _hasProgram(false),
       _rawLen(0), _proto(nullptr) {
     memset(_cache, 0, sizeof(_cache));
@@ -37,11 +38,9 @@ WearBlocksECA::WearBlocksECA()
     memset(_vars, 0, sizeof(_vars));
     memset(_reassemBuf, 0, sizeof(_reassemBuf));
     memset(_reassemLen, 0, sizeof(_reassemLen));
-    memset(_holdStart, 0, sizeof(_holdStart));
-    memset(_lastTrigger, 0, sizeof(_lastTrigger));
-    memset(_condActive, 0, sizeof(_condActive));
-    memset(_lastTriggerValid, 0, sizeof(_lastTriggerValid));
-    memset(_ruleLatched, 0, sizeof(_ruleLatched));
+    memset(_actionRuntime, 0, sizeof(_actionRuntime));
+    memset(_outputOwners, 0, sizeof(_outputOwners));
+    resetTimingState();
     memset(_rawProgram, 0, sizeof(_rawProgram));
 }
 
@@ -136,7 +135,7 @@ float WearBlocksECA::getSensorValue(uint8_t slot, uint8_t channelId) const {
 // ─────────────────────────────────────────────────────
 
 bool WearBlocksECA::loadProgram(const uint8_t* data, uint16_t len) {
-    if (len < 4) { Serial.println("[ECA] Program too short"); return false; }
+    if (!data || len < 6) { Serial.println("[ECA] Program too short"); return false; }
     if (data[0] != WB_ECA_MAGIC_0 || data[1] != WB_ECA_MAGIC_1) {
         Serial.println("[ECA] Bad magic"); return false;
     }
@@ -153,64 +152,122 @@ bool WearBlocksECA::loadProgram(const uint8_t* data, uint16_t len) {
         return false;
     }
 
-    uint16_t idx = 2;  // skip magic
-    /* version */ idx++;
+    // A valid replacement program owns the outputs from this point forward.
+    // Stop anything launched by the previous program before its rules vanish.
+    safeAllOutputs();
+    _running = false;
+    _hasProgram = false;
+    _rawLen = 0;
+
+    uint16_t idx = 3;  // skip magic + version
+    const uint16_t end = len - 1; // checksum byte is not part of the payload
+    auto need = [&](uint16_t count) -> bool {
+        if (idx > end || count > end - idx) {
+            Serial.println("[ECA] Truncated program");
+            return false;
+        }
+        return true;
+    };
 
     // Variables initial values
     memset(_vars, 0, sizeof(_vars));
+    if (!need(1)) return false;
     uint8_t numVars = data[idx++];
-    for (uint8_t i = 0; i < numVars && idx + 4 <= len - 1; i++) {
+    if (!need((uint16_t)numVars * 4)) return false;
+    for (uint8_t i = 0; i < numVars; i++) {
         if (i < WB_ECA_MAX_VARS) memcpy(&_vars[i], &data[idx], 4);
-        idx += 4;  // always advance past all declared vars
+        idx += 4;
     }
 
     // Virtual channels (22 bytes each)
-    if (idx >= len - 1) { Serial.println("[ECA] Truncated before VCs"); return false; }
+    if (!need(1)) return false;
     _numVCs = data[idx++];
     if (_numVCs > WB_ECA_MAX_VCS) { Serial.println("[ECA] Too many VCs"); return false; }
-    for (uint8_t i = 0; i < _numVCs && idx + 22 <= len - 1; i++) {
+    if (!need((uint16_t)_numVCs * 22)) return false;
+    for (uint8_t i = 0; i < _numVCs; i++) {
         memcpy(&_vcs[i], &data[idx], 22); idx += 22;
+        if (_vcs[i].vc_id >= WB_ECA_MAX_VCS || _vcs[i].op > VC_DIFF ||
+            _vcs[i].a_type > WB_REF_VAR || _vcs[i].b_type > WB_REF_VAR) {
+            Serial.println("[ECA] Invalid virtual channel");
+            return false;
+        }
     }
 
     // Rules
-    if (idx >= len - 1) { Serial.println("[ECA] Truncated before rules"); return false; }
+    if (!need(1)) return false;
     _numRules = data[idx++];
     if (_numRules > WB_ECA_MAX_RULES) { Serial.println("[ECA] Too many rules"); return false; }
     for (uint8_t r = 0; r < _numRules; r++) {
-        if (idx + 3 > len - 1) break;
+        if (!need(11)) return false;
         _rules[r].num_cond = data[idx++];
         _rules[r].logic    = data[idx++];
         _rules[r].num_act  = data[idx++];
-        uint8_t nc = min(_rules[r].num_cond, (uint8_t)4);
-        uint8_t na = min(_rules[r].num_act,  (uint8_t)4);
-        for (uint8_t c = 0; c < nc && idx + 15 <= len - 1; c++) {
-            memcpy(&_rules[r].conditions[c], &data[idx], 15); idx += 15;
+        memcpy(&_rules[r].hold_ms, &data[idx], 4); idx += 4;
+        memcpy(&_rules[r].cooldown_ms, &data[idx], 4); idx += 4;
+        if (_rules[r].num_cond > 4 || _rules[r].num_act > WB_ECA_MAX_ACTIONS ||
+            _rules[r].logic > LOGIC_OR) {
+            Serial.println("[ECA] Too many conditions/actions");
+            return false;
         }
-        for (uint8_t a = 0; a < na; a++) {
-            // Action header is now 6 bytes (target u32 + cmd u8 + numParams u8).
-            if (idx + 6 > len - 1) break;
+        if (!need((uint16_t)_rules[r].num_cond * 11)) return false;
+        for (uint8_t c = 0; c < _rules[r].num_cond; c++) {
+            memcpy(&_rules[r].conditions[c], &data[idx], 11); idx += 11;
+            const WBCondition& cond = _rules[r].conditions[c];
+            if (cond.ref_type > WB_REF_VAR || cond.op > COND_NEQ) {
+                Serial.println("[ECA] Invalid condition");
+                return false;
+            }
+        }
+        if (_rules[r].hold_ms > 0) {
+            for (uint8_t c = 0; c < _rules[r].num_cond; c++) {
+                const WBCondition& cond = _rules[r].conditions[c];
+                if (cond.ref_type == WB_REF_SLOT &&
+                    wbEcaIsTransientChannel(cond.channel_id)) {
+                    Serial.println("[ECA] hold_ms is invalid for transient events");
+                    return false;
+                }
+            }
+        }
+        for (uint8_t a = 0; a < _rules[r].num_act; a++) {
+            if (!need(17)) return false;
             WBAction& act = _rules[r].actions[a];
+            memset(&act, 0, sizeof(act));
             memcpy(&act.target, &data[idx], 4); idx += 4;
             act.cmd       = data[idx++];
+            act.mode      = data[idx++];
             uint8_t np    = data[idx++];
-            act.numParams = min(np, (uint8_t)WB_ACTION_MAX_PARAMS);
-            // Read params we have room for; skip the rest (each 10 bytes).
+            memcpy(&act.delay_ms, &data[idx], 4); idx += 4;
+            memcpy(&act.duration_ms, &data[idx], 4); idx += 4;
+            act.update_interval_ms = ((uint16_t)data[idx] << 8) | data[idx + 1];
+            idx += 2;
+            if (act.mode > ACTION_STREAM || np > WB_ACTION_MAX_PARAMS ||
+                act.delay_ms > 0x7FFFFFFFUL || act.duration_ms > 0x7FFFFFFFUL) {
+                Serial.println("[ECA] Invalid action lifecycle/params");
+                return false;
+            }
+            if (act.mode == ACTION_STREAM &&
+                (act.update_interval_ms < 20 || act.update_interval_ms > 800)) {
+                Serial.println("[ECA] STREAM interval must be 20..800 ms");
+                return false;
+            }
+            act.numParams = np;
+            if (!need((uint16_t)np * 10)) return false;
             for (uint8_t p = 0; p < np; p++) {
-                if (idx + 10 > len - 1) break;
-                if (p < WB_ACTION_MAX_PARAMS) {
-                    memcpy(&act.params[p], &data[idx], 10);
-                }
+                memcpy(&act.params[p], &data[idx], 10);
                 idx += 10;
+                if (act.params[p].type > WB_REF_VAR) {
+                    Serial.println("[ECA] Invalid action parameter ref");
+                    return false;
+                }
             }
         }
     }
+    if (idx != end) {
+        Serial.printf("[ECA] Trailing payload bytes: %u\n", (unsigned)(end - idx));
+        return false;
+    }
 
-    // Reset timing state
-    memset(_holdStart, 0, sizeof(_holdStart));
-    memset(_lastTrigger, 0, sizeof(_lastTrigger));
-    memset(_condActive, 0, sizeof(_condActive));
-    memset(_lastTriggerValid, 0, sizeof(_lastTriggerValid));
-    memset(_ruleLatched, 0, sizeof(_ruleLatched));
+    resetTimingState();
     memset(_eventFresh, 0, sizeof(_eventFresh));
     memset(_vcVal, 0, sizeof(_vcVal));
 
@@ -233,7 +290,7 @@ bool WearBlocksECA::loadProgram(const uint8_t* data, uint16_t len) {
 
 void WearBlocksECA::runProgram()  {
     if (_hasProgram) {
-        memset(_ruleLatched, 0, sizeof(_ruleLatched));
+        resetTimingState();
         _running = true;
         Serial.println("[ECA] Running");
     }
@@ -241,15 +298,18 @@ void WearBlocksECA::runProgram()  {
 
 void WearBlocksECA::stopProgram() {
     _running = false;
-    memset(_ruleLatched, 0, sizeof(_ruleLatched));
+    safeAllOutputs();
+    resetTimingState();
     Serial.println("[ECA] Stopped");
 }
 
 void WearBlocksECA::clearProgram(){
-    _running = false; _hasProgram = false; _numVCs = 0; _numRules = 0;
+    _running = false;
+    safeAllOutputs();
+    _hasProgram = false; _numVCs = 0; _numRules = 0;
     _rawLen = 0;
     memset(_vars, 0, sizeof(_vars));
-    memset(_ruleLatched, 0, sizeof(_ruleLatched));
+    resetTimingState();
     Serial.println("[ECA] Cleared");
 }
 
@@ -422,7 +482,7 @@ bool WearBlocksECA::evaluateConditions(const WBRule& rule, uint8_t rule_idx, uin
     }
 
     // hold_ms: condition must stay true for N ms before firing
-    uint16_t hold = (rule.num_cond > 0) ? rule.conditions[0].hold_ms : 0;
+    uint32_t hold = rule.hold_ms;
     if (hold > 0) {
         if (result) {
             if (!_condActive[rule_idx]) {
@@ -437,16 +497,6 @@ bool WearBlocksECA::evaluateConditions(const WBRule& rule, uint8_t rule_idx, uin
     }
 
     return result;
-}
-
-bool WearBlocksECA::ruleNeedsContinuousUpdates(const WBRule& rule) const {
-    for (uint8_t a = 0; a < rule.num_act && a < 4; a++) {
-        const WBAction& act = rule.actions[a];
-        for (uint8_t p = 0; p < act.numParams && p < WB_ACTION_MAX_PARAMS; p++) {
-            if (act.params[p].type != WB_REF_CONST) return true;
-        }
-    }
-    return false;
 }
 
 void WearBlocksECA::clearTransientEvents() {
@@ -464,8 +514,163 @@ void WearBlocksECA::clearTransientEvents() {
 //  Action Execution
 // ─────────────────────────────────────────────────────
 
-void WearBlocksECA::executeAction(const WBAction& act) {
-    if (!_proto) return;
+bool WearBlocksECA::timeReached(uint32_t now, uint32_t deadline) {
+    return (int32_t)(now - deadline) >= 0;
+}
+
+bool WearBlocksECA::isVariableCommand(uint8_t cmd) {
+    return cmd >= ACT_VAR_SET && cmd <= ACT_VAR_TOGGLE;
+}
+
+bool WearBlocksECA::isStopCommand(uint8_t cmd) {
+    return cmd == ACT_LED_OFF || cmd == ACT_LED_STOP ||
+           cmd == ACT_VIBRATE_STOP || cmd == ACT_AUDIO_STOP;
+}
+
+uint8_t WearBlocksECA::stopCommandFor(uint8_t cmd) {
+    if (cmd <= ACT_LED_STOP) return ACT_LED_OFF;
+    if (cmd >= ACT_VIBRATE && cmd <= ACT_VIBRATE_STOP) return ACT_VIBRATE_STOP;
+    if (cmd >= ACT_AUDIO_SET_TONE && cmd <= ACT_AUDIO_STOP) return ACT_AUDIO_STOP;
+    return 0xFF;
+}
+
+void WearBlocksECA::resetTimingState() {
+    memset(_holdStart, 0, sizeof(_holdStart));
+    memset(_lastTrigger, 0, sizeof(_lastTrigger));
+    memset(_condActive, 0, sizeof(_condActive));
+    memset(_lastTriggerValid, 0, sizeof(_lastTriggerValid));
+    memset(_ruleLatched, 0, sizeof(_ruleLatched));
+    memset(_actionRuntime, 0, sizeof(_actionRuntime));
+}
+
+uint32_t WearBlocksECA::claimOutput(uint32_t uid, uint8_t stopCmd) {
+    uint8_t freeIdx = WB_ECA_MAX_OUTPUTS;
+    for (uint8_t i = 0; i < WB_ECA_MAX_OUTPUTS; i++) {
+        if (_outputOwners[i].used && _outputOwners[i].uid == uid) {
+            freeIdx = i;
+            break;
+        }
+        if (!_outputOwners[i].used && freeIdx == WB_ECA_MAX_OUTPUTS) freeIdx = i;
+    }
+    if (freeIdx == WB_ECA_MAX_OUTPUTS) {
+        // The table is sized for every rule action, so this can only happen
+        // after malformed runtime state. Refuse ownership rather than evicting
+        // another live output and creating an unsafe stale timer.
+        return 0;
+    }
+    _nextOwnerToken++;
+    if (_nextOwnerToken == 0) _nextOwnerToken++;
+    _outputOwners[freeIdx] = {true, uid, _nextOwnerToken, stopCmd};
+    return _nextOwnerToken;
+}
+
+bool WearBlocksECA::ownsOutput(uint32_t uid, uint32_t token) const {
+    if (token == 0) return false;
+    for (uint8_t i = 0; i < WB_ECA_MAX_OUTPUTS; i++) {
+        if (_outputOwners[i].used && _outputOwners[i].uid == uid &&
+            _outputOwners[i].token == token) return true;
+    }
+    return false;
+}
+
+void WearBlocksECA::releaseOutput(uint32_t uid, uint32_t token) {
+    for (uint8_t i = 0; i < WB_ECA_MAX_OUTPUTS; i++) {
+        if (_outputOwners[i].used && _outputOwners[i].uid == uid &&
+            (token == 0 || _outputOwners[i].token == token)) {
+            _outputOwners[i].used = false;
+            return;
+        }
+    }
+}
+
+bool WearBlocksECA::executeStop(uint32_t uid, uint8_t stopCmd) {
+    uint8_t slot = _uidToSlot ? _uidToSlot(uid) : 0;
+    if (slot == 0) return false;
+    return dispatchActuator(slot, uid, stopCmd, nullptr, 0);
+}
+
+void WearBlocksECA::safeAllOutputs() {
+    for (uint8_t i = 0; i < WB_ECA_MAX_OUTPUTS; i++) {
+        if (!_outputOwners[i].used) continue;
+        executeStop(_outputOwners[i].uid, _outputOwners[i].stopCmd);
+        _outputOwners[i].used = false;
+    }
+    memset(_actionRuntime, 0, sizeof(_actionRuntime));
+}
+
+void WearBlocksECA::startAction(uint8_t ruleIdx, uint8_t actionIdx, uint32_t now) {
+    WBAction& act = _rules[ruleIdx].actions[actionIdx];
+    WBActionRuntime& state = _actionRuntime[ruleIdx][actionIdx];
+    if (!executeAction(act)) {
+        state.pending = false;
+        return;
+    }
+    state.pending = false;
+    if (isStopCommand(act.cmd)) {
+        releaseOutput(act.target, 0);
+        state.active = false;
+        state.token = 0;
+        return;
+    }
+    uint8_t stopCmd = stopCommandFor(act.cmd);
+    if (stopCmd == 0xFF || isVariableCommand(act.cmd)) {
+        state.active = false;
+        state.token = 0;
+        return;
+    }
+    state.token = claimOutput(act.target, stopCmd);
+    state.active = state.token != 0 &&
+                   (act.duration_ms > 0 || act.mode == ACTION_WHILE_TRUE ||
+                    act.mode == ACTION_STREAM);
+    state.stopAt = act.duration_ms > 0 ? now + act.duration_ms : 0;
+    uint16_t interval = max((uint16_t)20, act.update_interval_ms);
+    state.nextUpdateAt = now + interval;
+}
+
+void WearBlocksECA::stopAction(uint8_t ruleIdx, uint8_t actionIdx,
+                               bool cancelPending) {
+    const WBAction& act = _rules[ruleIdx].actions[actionIdx];
+    WBActionRuntime& state = _actionRuntime[ruleIdx][actionIdx];
+    if (ownsOutput(act.target, state.token)) {
+        uint8_t stopCmd = stopCommandFor(act.cmd);
+        if (stopCmd != 0xFF) executeStop(act.target, stopCmd);
+        releaseOutput(act.target, state.token);
+    }
+    state.active = false;
+    if (cancelPending) state.pending = false;
+    state.stopAt = 0;
+    state.token = 0;
+}
+
+void WearBlocksECA::serviceAction(uint8_t ruleIdx, uint8_t actionIdx,
+                                  bool ruleTrue, uint32_t now) {
+    const WBAction& act = _rules[ruleIdx].actions[actionIdx];
+    WBActionRuntime& state = _actionRuntime[ruleIdx][actionIdx];
+    if (state.pending) {
+        if (act.mode != ACTION_TRIGGER && !ruleTrue) {
+            state.pending = false;
+        } else if (timeReached(now, state.dueAt)) {
+            startAction(ruleIdx, actionIdx, now);
+        }
+    }
+    if (!state.active) return;
+    if (act.duration_ms > 0 && timeReached(now, state.stopAt)) {
+        stopAction(ruleIdx, actionIdx);
+        return;
+    }
+    if ((act.mode == ACTION_WHILE_TRUE || act.mode == ACTION_STREAM) && !ruleTrue) {
+        stopAction(ruleIdx, actionIdx);
+        return;
+    }
+    if (act.mode == ACTION_STREAM && timeReached(now, state.nextUpdateAt)) {
+        // A superseded stream must never reclaim the output from its newer owner.
+        if (ownsOutput(act.target, state.token)) executeAction(act);
+        uint16_t interval = max((uint16_t)20, act.update_interval_ms);
+        state.nextUpdateAt = now + interval;
+    }
+}
+
+bool WearBlocksECA::executeAction(const WBAction& act) {
 
     // Resolve all typed params to floats. Per-cmd handlers below decide
     // how to interpret each slot (color byte, ms, count, raw float, …).
@@ -481,7 +686,7 @@ void WearBlocksECA::executeAction(const WBAction& act) {
     for (uint8_t i = 0; i < act.numParams && i < WB_ACTION_MAX_PARAMS; i++) {
         if (isnanf(vals[i])) {
             Serial.printf("[ECA] ACT skip: param %u unavailable\n", i);
-            return;
+            return false;
         }
     }
 
@@ -500,7 +705,7 @@ void WearBlocksECA::executeAction(const WBAction& act) {
     // target is the var_id, packed in the low byte of the 4-byte target.
     if (act.cmd >= ACT_VAR_SET && act.cmd <= ACT_VAR_TOGGLE) {
         uint8_t vid = (uint8_t)(act.target & 0xFF);
-        if (vid >= WB_ECA_MAX_VARS) return;
+        if (vid >= WB_ECA_MAX_VARS) return false;
         switch ((WBActCmd)act.cmd) {
             case ACT_VAR_RESET:  _vars[vid] = 0.0f; break;
             case ACT_VAR_TOGGLE: _vars[vid] = (_vars[vid] >= 0.5f) ? 0.0f : 1.0f; break;
@@ -509,7 +714,7 @@ void WearBlocksECA::executeAction(const WBAction& act) {
             default: break;
         }
         Serial.printf("[ECA] VAR[%d] = %.2f\n", vid, _vars[vid]);
-        return;
+        return true;
     }
 
     // Actuator commands: target is a module UID. Resolve to slot before
@@ -518,50 +723,73 @@ void WearBlocksECA::executeAction(const WBAction& act) {
     if (targetSlot == 0) {
         Serial.printf("[ECA] ACT skip: uid=%08lX not registered\n",
                       (unsigned long)act.target);
-        return;
+        return false;
     }
 
     uint8_t buf[8];
+    uint8_t lease10ms = 0;
+    if (act.mode == ACTION_STREAM) {
+        uint32_t leaseMs = max((uint32_t)100, (uint32_t)act.update_interval_ms * 3U);
+        leaseMs = min(leaseMs, (uint32_t)2550);
+        lease10ms = (uint8_t)((leaseMs + 9) / 10);
+    }
+    bool sent = false;
     switch ((WBActCmd)act.cmd) {
         case ACT_LED_SOLID: {
             buf[0] = clampByte(vals[0]);  // R
             buf[1] = clampByte(vals[1]);  // G
             buf[2] = clampByte(vals[2]);  // B
-            dispatchActuator(targetSlot, act.target, act.cmd, buf, 3);
+            buf[3] = (act.duration_ms >> 24) & 0xFF;
+            buf[4] = (act.duration_ms >> 16) & 0xFF;
+            buf[5] = (act.duration_ms >> 8) & 0xFF;
+            buf[6] = act.duration_ms & 0xFF;
+            buf[7] = lease10ms;
+            sent = dispatchActuator(targetSlot, act.target, act.cmd, buf, 8);
             break;
         }
         case ACT_LED_OFF:
         case ACT_LED_STOP:
-            dispatchActuator(targetSlot, act.target, act.cmd, nullptr, 0);
+            sent = dispatchActuator(targetSlot, act.target, act.cmd, nullptr, 0);
             break;
 
         case ACT_VIBRATE: {
-            uint16_t dur = clampU16(vals[1]);
+            uint32_t dur = act.duration_ms > 0
+                         ? act.duration_ms
+                         : clampU16(vals[1]); // legacy JSON compatibility
             buf[0] = clampByte(vals[0]);          // intensity
-            buf[1] = (dur >> 8) & 0xFF;
-            buf[2] = dur & 0xFF;
-            dispatchActuator(targetSlot, act.target, act.cmd, buf, 3);
+            buf[1] = (dur >> 24) & 0xFF;
+            buf[2] = (dur >> 16) & 0xFF;
+            buf[3] = (dur >> 8) & 0xFF;
+            buf[4] = dur & 0xFF;
+            buf[5] = lease10ms;
+            sent = dispatchActuator(targetSlot, act.target, act.cmd, buf, 6);
             break;
         }
         case ACT_VIBRATE_PULSE: {
             buf[0] = clampByte(vals[0]);  // intensity
-            buf[1] = clampByte(vals[1]);  // on_10ms
-            buf[2] = clampByte(vals[2]);  // off_10ms
+            buf[1] = clampByte(fmaxf(1.0f, ceilf(vals[1] / 10.0f))); // on, 10 ms units
+            buf[2] = clampByte(fmaxf(1.0f, ceilf(vals[2] / 10.0f))); // off, 10 ms units
             buf[3] = clampByte(vals[3]);  // count
-            dispatchActuator(targetSlot, act.target, act.cmd, buf, 4);
+            buf[4] = lease10ms;
+            sent = dispatchActuator(targetSlot, act.target, act.cmd, buf, 5);
             break;
         }
         case ACT_VIBRATE_RAMP: {
-            uint16_t dur = clampU16(vals[2]);
+            uint32_t dur = act.duration_ms > 0
+                         ? act.duration_ms
+                         : clampU16(vals[2]); // legacy JSON compatibility
             buf[0] = clampByte(vals[0]);  // from_pct
             buf[1] = clampByte(vals[1]);  // to_pct
-            buf[2] = (dur >> 8) & 0xFF;
-            buf[3] = dur & 0xFF;
-            dispatchActuator(targetSlot, act.target, act.cmd, buf, 4);
+            buf[2] = (dur >> 24) & 0xFF;
+            buf[3] = (dur >> 16) & 0xFF;
+            buf[4] = (dur >> 8) & 0xFF;
+            buf[5] = dur & 0xFF;
+            buf[6] = lease10ms;
+            sent = dispatchActuator(targetSlot, act.target, act.cmd, buf, 7);
             break;
         }
         case ACT_VIBRATE_STOP:
-            dispatchActuator(targetSlot, act.target, act.cmd, nullptr, 0);
+            sent = dispatchActuator(targetSlot, act.target, act.cmd, nullptr, 0);
             break;
 
         case ACT_AUDIO_SET_TONE: {
@@ -569,11 +797,16 @@ void WearBlocksECA::executeAction(const WBAction& act) {
             buf[0] = freq & 0xFF;          // freq_lo (LE — module_amplifier reads p[0] | p[1]<<8)
             buf[1] = (freq >> 8) & 0xFF;   // freq_hi
             buf[2] = clampByte(vals[1]);   // amp 0..255
-            dispatchActuator(targetSlot, act.target, act.cmd, buf, 3);
+            buf[3] = (act.duration_ms >> 24) & 0xFF;
+            buf[4] = (act.duration_ms >> 16) & 0xFF;
+            buf[5] = (act.duration_ms >> 8) & 0xFF;
+            buf[6] = act.duration_ms & 0xFF;
+            buf[7] = lease10ms;
+            sent = dispatchActuator(targetSlot, act.target, act.cmd, buf, 8);
             break;
         }
         case ACT_AUDIO_STOP:
-            dispatchActuator(targetSlot, act.target, act.cmd, nullptr, 0);
+            sent = dispatchActuator(targetSlot, act.target, act.cmd, nullptr, 0);
             break;
 
         // LED RAMP/BREATHE/BLINK/RAINBOW reserved — module_led v3 only
@@ -582,12 +815,15 @@ void WearBlocksECA::executeAction(const WBAction& act) {
             uint8_t n = act.numParams;
             if (n > sizeof(buf)) n = sizeof(buf);
             for (uint8_t i = 0; i < n; i++) buf[i] = clampByte(vals[i]);
-            dispatchActuator(targetSlot, act.target, act.cmd, buf, n);
+            sent = dispatchActuator(targetSlot, act.target, act.cmd, buf, n);
             break;
         }
     }
-    Serial.printf("[ECA] ACT slot=%d cmd=%d (uid=%08lX)\n",
-                  targetSlot, act.cmd, (unsigned long)act.target);
+    if (sent) {
+        Serial.printf("[ECA] ACT slot=%d cmd=%d (uid=%08lX)\n",
+                      targetSlot, act.cmd, (unsigned long)act.target);
+    }
+    return sent;
 }
 
 // ─────────────────────────────────────────────────────
@@ -605,30 +841,32 @@ void WearBlocksECA::tick() {
         _vcVal[_vcs[i].vc_id] = computeVC(i);
     }
 
-    // Step 2: evaluate each rule
+    // Step 2: evaluate rules and service their cooperative action schedulers.
     uint32_t now = millis();
     for (uint8_t r = 0; r < _numRules; r++) {
-        if (!evaluateConditions(_rules[r], r, now)) {
+        bool conditionTrue = evaluateConditions(_rules[r], r, now);
+        for (uint8_t a = 0; a < _rules[r].num_act && a < WB_ECA_MAX_ACTIONS; a++) {
+            serviceAction(r, a, conditionTrue, now);
+        }
+
+        if (!conditionTrue) {
             _ruleLatched[r] = false;
             continue;
         }
+        if (_ruleLatched[r]) continue;
 
-        // Check cooldown on rule level
-        uint16_t cd = (_rules[r].num_cond > 0) ? _rules[r].conditions[0].cooldown_ms : 0;
+        uint32_t cd = _rules[r].cooldown_ms;
         if (cd > 0 && _lastTriggerValid[r] && (now - _lastTrigger[r]) < cd) continue;
-
-        bool continuous = ruleNeedsContinuousUpdates(_rules[r]);
-        if (!continuous && _ruleLatched[r]) continue;
 
         _lastTrigger[r] = now;
         _lastTriggerValid[r] = true;
         _ruleLatched[r] = true;
-        if (continuous) {
-            _condActive[r] = false;  // let held dynamic rules refresh after cooldown
-        }
-
-        for (uint8_t a = 0; a < _rules[r].num_act && a < 4; a++) {
-            executeAction(_rules[r].actions[a]);
+        for (uint8_t a = 0; a < _rules[r].num_act && a < WB_ECA_MAX_ACTIONS; a++) {
+            WBAction& act = _rules[r].actions[a];
+            WBActionRuntime& state = _actionRuntime[r][a];
+            state.pending = true;
+            state.dueAt = now + act.delay_ms;
+            if (act.delay_ms == 0) startAction(r, a, now);
         }
     }
     clearTransientEvents();

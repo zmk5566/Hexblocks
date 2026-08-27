@@ -1,7 +1,10 @@
 /*
- * WearBlocks Module — RGB LED (Rose #C68E9E), v3
+ * WearBlocks Module — RGB LED (Rose #C68E9E), v4
  * Target: ESP32-C3-MINI-1
  * Actuator: WS2811/WS2812 strip on GPIO 5
+ *
+ * v4 keeps the v3 inline RGB command and adds OFF/STOP plus an optional
+ * 32-bit local duration watchdog.
  *
  * v3 vs v2:
  *   - Registration via WBModule (UID/fwHash/HELLO retry/onAck shared with IMU v3)
@@ -48,13 +51,15 @@ WearBlocksDescriptor descriptor;
 WBModule             module(can, protocol, descriptor);
 CRGB                 leds[NUM_LEDS];
 
-static const char FW_VERSION[] = "3.0";
+static const char FW_VERSION[] = "4.0";
 
 // ── Command ids ──────────────────────────────────────────────
 // 0x01 matches ACT_LED_SOLID in WearBlocksECA so the existing debug console
 // fallback (free-text bytes) keeps working until step 3 surfaces the
 // descriptor command schema.
 static const uint8_t ACT_LED_SET_RGB = 0x01;
+static bool     ledTimed = false;
+static uint32_t ledUntil = 0;
 
 // ── Child-presence debounce ──────────────────────────────────
 #if CHILD_DETECT
@@ -159,6 +164,23 @@ void onActuatorCmd(uint8_t cmd, const uint8_t* p, uint8_t pLen) {
         }
         Serial.printf("[LED] SET_RGB r=%d g=%d b=%d\n", p[0], p[1], p[2]);
         setAll(p[0], p[1], p[2]);
+        if (pLen >= 7) {
+            uint32_t duration = ((uint32_t)p[3] << 24) |
+                                ((uint32_t)p[4] << 16) |
+                                ((uint32_t)p[5] << 8) | p[6];
+            uint32_t lease = (pLen >= 8) ? (uint32_t)p[7] * 10U : 0;
+            uint32_t timeout = lease > 0 ? lease : duration;
+            ledTimed = timeout > 0;
+            ledUntil = millis() + timeout;
+        } else {
+            ledTimed = false;
+        }
+        return;
+    }
+    if (cmd == ACT_LED_OFF || cmd == ACT_LED_STOP) {
+        ledTimed = false;
+        setAll(0, 0, 0);
+        Serial.println("[LED] STOP");
         return;
     }
     Serial.printf("[LED] unknown cmd=0x%02X (ignored)\n", cmd);
@@ -209,6 +231,10 @@ void setup() {
 // ── Loop ──────────────────────────────────────────────────────
 void loop() {
     module.tick();
+    if (ledTimed && (int32_t)(millis() - ledUntil) >= 0) {
+        ledTimed = false;
+        setAll(0, 0, 0);
+    }
 #if CHILD_DETECT
     scanChildren();
 #endif

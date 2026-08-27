@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 import serial_bridge
-from wb_eca import CH
+from wb_eca import Act, Action, ActionMode, CH
 
 
 @pytest.fixture(autouse=True)
@@ -60,6 +60,40 @@ def test_non_imu_sim_payloads_use_catalog_labels(monkeypatch):
         "celsius": CH.CELSIUS,
         "humidity": CH.HUMIDITY,
     }
+
+
+def test_sim_audio_and_vibration_use_v4_lifecycle_timing(monkeypatch):
+    monkeypatch.setattr(serial_bridge, "_sim_monotonic_ms", lambda: 10_000)
+    monkeypatch.setattr(serial_bridge.time, "time", lambda: 20.0)
+
+    audio = serial_bridge.SimModule("audio")
+    vib = serial_bridge.SimModule("vib")
+    serial_bridge.sim_modules[audio.slot] = audio
+    serial_bridge.sim_modules[vib.slot] = vib
+
+    tone = Action(target=int(audio.uid, 16), cmd=Act.AUDIO_SET_TONE,
+                  duration_ms=500)
+    tone.vals = [880.0, 200.0]
+    serial_bridge.dispatch_action(tone)
+    assert audio.audio == {
+        "frequency_hz": 880, "amplitude": 200, "mode": "tone",
+        "until_ms": 20_500, "_deadline_ms": 10_500,
+    }
+
+    stream_tone = Action(target=int(audio.uid, 16), cmd=Act.AUDIO_SET_TONE,
+                         mode=ActionMode.STREAM, update_interval_ms=100)
+    stream_tone.vals = [440.0, 100.0]
+    serial_bridge.dispatch_action(stream_tone)
+    assert audio.audio["until_ms"] == 20_300
+    assert audio.audio["_deadline_ms"] == 10_300
+
+    pulse = Action(target=int(vib.uid, 16), cmd=Act.VIBRATE_PULSE)
+    pulse.vals = [80.0, 100.0, 50.0, 3.0]
+    serial_bridge.dispatch_action(pulse)
+    assert vib.vib["on_ms"] == 100
+    assert vib.vib["off_ms"] == 50
+    assert vib.vib["until_ms"] == 20_450
+    assert vib.vib["_deadline_ms"] == 10_450
 
 
 @pytest.mark.asyncio
