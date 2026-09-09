@@ -1,6 +1,7 @@
 import { LitElement, html, css } from 'lit';
 import { channelsForModule } from '../module-channel-map.js';
 import { formatCatalog } from '../llm-catalog.js';
+import { EXTENSION_BOARD, isExtensionRequest, extensionPrompt } from '../data/extension-board.js';
 import {
   PLAN_STATUS,
   makePlanFromEnvelope,
@@ -11,6 +12,7 @@ import {
 // Intent labels recognised by the classifier. Anything else falls back to
 // `generate_rules`, which preserves pre-Loop-A behaviour.
 const VALID_INTENTS = [
+  'extend_module',
   'recommend_modules',
   'generate_rules',
   'repair_rules',
@@ -107,6 +109,30 @@ export class WbLlmPanel extends LitElement {
       --llm-muted-border: #374151;
     }
 
+    .extension-toggle {
+      margin-left: auto; padding: 5px 8px; border-radius: 6px;
+      border: 1px solid var(--llm-muted-border); background: transparent;
+      color: var(--wb-text, #1a1a2e); cursor: pointer; font: inherit; font-size: 11px;
+    }
+    .extension-toggle:disabled { opacity: .5; cursor: default; }
+    .extension-guide {
+      margin: 12px 0; padding: 12px; border: 1px solid var(--llm-panel-info-border);
+      border-radius: 10px; background: var(--llm-panel-info-bg); font-size: 12px;
+      line-height: 1.6; color: var(--wb-text, #1a1a2e);
+    }
+    .extension-guide summary { cursor: pointer; font-weight: 600; }
+    .extension-guide p { margin: 8px 0; }
+    .extension-guide small { color: var(--llm-muted); }
+    .pin-board { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; border: 1px solid var(--llm-muted-border); border-radius: 12px; padding: 10px; }
+    .pin-connector { margin: 0; }
+    .pin-connector.wide { grid-column: 1 / -1; }
+    .pin-connector:not(.wide) .pin-row { grid-template-columns: 1fr; }
+    .pin-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+    .pin-item { display: flex; align-items: center; flex-direction: column; gap: 3px; font-size: 11px; }
+    .pin-hole { display: grid; place-items: center; width: 24px; height: 24px;
+      border-radius: 50%; border: 2px solid var(--llm-info); font-weight: 700; }
+    .pin-hole.power { border-color: #e67658; }
+    .pin-hole.ground { border-color: var(--llm-muted); }
     .chat-header {
       padding: 10px 14px;
       border-bottom: 1px solid var(--wb-border, #1e3a5f);
@@ -375,6 +401,7 @@ export class WbLlmPanel extends LitElement {
     // used to compute "schema diff since the last turn" for Loop A feedback.
     this._lastPromptSchema = null;
     this._lastIntent = null;
+    this._extensionMode = false;
     this._theme = (window.themeController && window.themeController.current()) || 'light';
     this._onThemeChange = (e) => {
       this._setTheme(e.detail?.theme || 'light');
@@ -442,11 +469,14 @@ export class WbLlmPanel extends LitElement {
   // Falls back to DEFAULT_INTENT on timeout, network error, or parse fail
   // so the user never gets stuck behind a broken classifier.
   async _classifyIntent(userText) {
+    // Keep short wiring follow-ups in the same conversation, even offline.
+    if (this._extensionMode || isExtensionRequest(userText)) return 'extend_module';
     const sys =
       'You are an intent classifier for a wearable-sensor authoring tool. ' +
       'Read the user message and respond with EXACTLY one XML tag and nothing else: ' +
       '<intent>recommend_modules</intent>, <intent>generate_rules</intent>, ' +
-      '<intent>repair_rules</intent>, <intent>explain</intent>, or <intent>other</intent>. ' +
+      '<intent>repair_rules</intent>, <intent>extend_module</intent>, <intent>explain</intent>, or <intent>other</intent>. ' +
+      'Pick extend_module when the user wants to build or wire a custom hardware module using the extension board; ' +
       'Pick recommend_modules when the user asks what hardware they need; ' +
       'generate_rules when they describe a new behaviour to build; ' +
       'repair_rules when they want existing rules fixed; ' +
@@ -483,6 +513,7 @@ export class WbLlmPanel extends LitElement {
   }
 
   _buildSystemPrompt(intent = DEFAULT_INTENT) {
+    if (intent === 'extend_module') return extensionPrompt();
     const modList = (this.modules || [])
       .filter(m => m.active !== false)
       .map(m => {
@@ -767,6 +798,8 @@ Respond in the same language the user writes in.`;
     // Defaults to generate_rules (legacy behaviour) on any failure.
     const intent = await this._classifyIntent(text);
     this._lastIntent = intent;
+    this._extensionMode = intent === 'extend_module';
+    if (this._extensionMode) this._proposedRules = null;
     this._lastPromptSchema = this._snapshotSchema();
 
     const historySnapshot = this._messages.map(m => ({ role: m.role, content: m.content }));
@@ -842,7 +875,7 @@ Respond in the same language the user writes in.`;
 
     // Match workspace_update, tolerating markdown code blocks around it
     const match = full.match(/<workspace_update>([\s\S]*?)<\/workspace_update>/);
-    if (match) {
+    if (match && intent !== 'extend_module') {
       const jsonText = match[1].trim()
         .replace(/^```(?:json)?\s*/, '')  // strip leading ```json or ```
         .replace(/\s*```$/, '');          // strip trailing ```
@@ -854,7 +887,7 @@ Respond in the same language the user writes in.`;
     // Match module_recommendation envelope (Loop A). A fresh envelope
     // REPLACES any active plan so the user can iterate by re-asking.
     const recMatch = full.match(/<module_recommendation>([\s\S]*?)<\/module_recommendation>/);
-    if (recMatch) {
+    if (recMatch && intent !== 'extend_module') {
       const jsonText = recMatch[1].trim()
         .replace(/^```(?:json)?\s*/, '')
         .replace(/\s*```$/, '');
@@ -1030,23 +1063,63 @@ Respond in the same language the user writes in.`;
     `;
   }
 
+  _startExtension() {
+    this._extensionMode = true;
+    this._proposedRules = null;
+    if (!this._inputValue.trim()) this._inputValue = '我想接入一个自定义模块';
+    this.requestUpdate();
+  }
+
+  _endExtension() {
+    this._extensionMode = false;
+    if (this._inputValue === '我想接入一个自定义模块') this._inputValue = '';
+    this._lastIntent = null;
+    this.requestUpdate();
+  }
+
+  _renderExtensionGuide() {
+    if (!this._extensionMode) return '';
+    return html`
+      <details class="extension-guide" open>
+        <summary>new-ver-hub · 接口引脚图</summary>
+        <p>按接口名和脚号接线。此图仅表示引脚对应关系，不表示实物位置或插头方向。</p>
+        <div class="pin-board" role="img" aria-label="扩展底板接口示意，按脚号排列，非实物方向">
+          ${EXTENSION_BOARD.connectors.map(c => html`
+            <div class="pin-connector ${c.pins.length > 1 ? 'wide' : ''}">
+              <strong>${c.name}</strong>
+              <div class="pin-row">${c.pins.map((net, i) => html`
+                <div class="pin-item"><span class="pin-hole ${net === '3.3V' ? 'power' : net === 'GND' ? 'ground' : ''}">${i + 1}</span><span>${net}</span></div>
+              `)}</div>
+            </div>
+          `)}
+        </div>
+        <p>J4 与 J2 第 5 脚共用 GPIO0；J5 与 J3 第 5 脚共用 GPIO1。电源接法需先确认外设型号。接线前请核对实物接口名和 1 脚标记。</p>
+        <small>引脚依据：PCB 文件 · ${EXTENSION_BOARD.verified} 核对</small>
+      </details>`;
+  }
+
   render() {
     return html`
-      <div class="chat-header">LLM Assistant</div>
+      <div class="chat-header">LLM Assistant
+        ${this._extensionMode
+          ? html`<button class="extension-toggle" ?disabled=${this._loading} @click=${this._endExtension}>结束接线讨论</button>`
+          : html`<button class="extension-toggle" ?disabled=${this._loading} @click=${this._startExtension}>＋ 自定义模块</button>`}
+      </div>
 
       <div class="chat-body">
         ${this._messages.length === 0
-          ? html`<div class="empty-hint">Describe a rule or ask about your modules.<br>The LLM sees the current workspace.</div>`
+          ? this._extensionMode ? html`<p>想接什么器件？告诉我型号或引脚标注，我们一起确认接法。</p>` : html`<div class="empty-hint">Describe a rule or ask about your modules.<br>也可以聊聊如何接入自己的传感器或执行器。</div>`
           : this._messages.map(msg => html`
               <div class="bubble ${msg.role} ${msg.streaming ? 'streaming' : ''}">
                 ${this._renderMessageContent(msg.content)}
               </div>
             `)
         }
+        ${this._renderExtensionGuide()}
       </div>
 
       ${this._renderProposedBanner()}
-      ${this._renderRecommendationPlan()}
+      ${this._extensionMode ? '' : this._renderRecommendationPlan()}
 
       <div class="chat-input-area">
         <textarea class="chat-input"
