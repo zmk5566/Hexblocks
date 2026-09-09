@@ -54,6 +54,8 @@
  *   $L,INFO                emit LoRa logger status rows
  *   $L,CONFIG <uidHex> <base64Profile>
  *                           send logger topic allowlist over SYS_CONFIG
+ *   $AP <uidHex> <base64WBAP>
+ *                           validate and send an audio patch over SYS_CONFIG
  */
 
 #ifndef WB_HUB_ENABLE_WIFI_OSC
@@ -69,6 +71,7 @@
 #include <WearBlocksDescriptor.h>
 #include <WearBlocksECA.h>
 #include <WearBlocksLogger.h>
+#include <WearBlocksAudio.h>
 #include <WearBlocksTransport.h>
 #if WB_HUB_ENABLE_WIFI_OSC
 #include <WearBlocksWireless.h>
@@ -377,6 +380,8 @@ uint32_t statsStart = 0;
 // LoRa logger configuration remains available in both Hub variants.
 static uint32_t g_loggerConfigRev[WB_MAX_MODULES] = {};
 static uint8_t  g_loggerProvisionSession[WB_MAX_MODULES] = {};
+static uint32_t g_audioPatchConfigRev[WB_MAX_MODULES] = {};
+static uint8_t  g_audioPatchProvisionSession[WB_MAX_MODULES] = {};
 
 #if WB_HUB_ENABLE_WIFI_OSC
 // ── Wi-Fi / OSC fallback ───────────────────────────────────────
@@ -525,6 +530,16 @@ static bool moduleIsLogger(const RegisteredModule* m) {
             strcmp(cap.modality, "lora_uplink") == 0) {
             return true;
         }
+    }
+    return false;
+}
+
+static bool moduleIsAudio(const RegisteredModule* m) {
+    if (!m || !m->hasDescriptor) return false;
+    if (strcmp(m->descriptor.category, "audio_output") == 0) return true;
+    for (uint8_t i = 0; i < m->descriptor.numCapabilities; i++) {
+        const WBCapability& cap = m->descriptor.capabilities[i];
+        if (strcmp(cap.modality, "audio_synth") == 0) return true;
     }
     return false;
 }
@@ -687,9 +702,22 @@ void onSlotRemoved(uint32_t uid);
 
 void onSysConfigAck(uint8_t moduleSlot, uint8_t status, uint8_t sessionId) {
     const RegisteredModule* m = registry.getModule(moduleSlot);
+    bool audioAck = moduleSlot < WB_MAX_MODULES &&
+                    g_audioPatchProvisionSession[moduleSlot] != 0 &&
+                    g_audioPatchProvisionSession[moduleSlot] == sessionId;
     bool loggerAck = moduleSlot < WB_MAX_MODULES &&
+                     g_loggerProvisionSession[moduleSlot] != 0 &&
                      g_loggerProvisionSession[moduleSlot] == sessionId;
-    if (loggerAck) {
+    if (audioAck) {
+        out.printf("$AP,ACK,%s,%u,%lu\n",
+                   m ? uidHex(m->uid) : "????????", (unsigned)status,
+                   (unsigned long)g_audioPatchConfigRev[moduleSlot]);
+        Serial.printf("[AUDIO] patch ack slot=%u status=%u session=%u rev=%lu\n",
+                      (unsigned)moduleSlot, (unsigned)status,
+                      (unsigned)sessionId,
+                      (unsigned long)g_audioPatchConfigRev[moduleSlot]);
+        g_audioPatchProvisionSession[moduleSlot] = 0;
+    } else if (loggerAck) {
         Serial.printf("[LORA-LOG] config ack slot=%u uid=%s status=%u session=%u rev=%lu\n",
                       (unsigned)moduleSlot, m ? uidHex(m->uid) : "????????",
                       (unsigned)status, (unsigned)sessionId,
@@ -1442,6 +1470,7 @@ static bool dispatchActuatorForLink(uint8_t slot, uint32_t uid, uint8_t cmd,
 static bool dispatchTopicForLink(uint8_t slot, uint32_t uid, uint8_t channelId,
                                  bool enable);
 bool handleLoggerHostCommand(const char* cmd);
+bool handleAudioPatchHostCommand(const char* cmd);
 
 bool handleLoggerHostCommand(const char* cmd) {
     if (strcmp(cmd, "$L,INFO") == 0) {
@@ -1510,6 +1539,94 @@ bool handleLoggerHostCommand(const char* cmd) {
     }
 
     return false;
+}
+
+static bool provisionAudioPatchForSlot(uint8_t slot, const uint8_t* patchBytes,
+                                       uint16_t patchLen, uint32_t configRev) {
+    if (slot == 0 || slot >= WB_MAX_MODULES || !patchBytes || patchLen == 0) {
+        return false;
+    }
+    uint8_t sessionId = (uint8_t)((configRev ^ millis() ^ 0xA5U) & 0xFFU);
+    if (sessionId == 0) sessionId = 1;
+    bool ok = protocol.sendSysConfig(slot, patchBytes, patchLen, sessionId);
+    if (ok) {
+        g_audioPatchConfigRev[slot] = configRev;
+        g_audioPatchProvisionSession[slot] = sessionId;
+    }
+    return ok;
+}
+
+bool handleAudioPatchHostCommand(const char* cmd) {
+    if (strncmp(cmd, "$AP", 3) != 0 ||
+        (cmd[3] != ' ' && cmd[3] != ',')) {
+        return false;
+    }
+
+    const char* p = cmd + 3;
+    while (*p == ' ' || *p == ',') p++;
+    char target[9] = {0};
+    uint8_t targetLen = 0;
+    while (*p && *p != ' ' && *p != ',' && targetLen < 8) {
+        target[targetLen++] = *p++;
+    }
+    if (targetLen != 8 || (*p != ' ' && *p != ',')) {
+        out.println("$ERR AP expects uid base64_patch");
+        return true;
+    }
+    while (*p == ' ' || *p == ',') p++;
+    if (!*p) {
+        out.println("$ERR AP expects uid base64_patch");
+        return true;
+    }
+
+    uint32_t uid;
+    if (!parseUidHex(target, uid)) {
+        out.println("$ERR AP bad_uid");
+        return true;
+    }
+    uint8_t slot = registry.findByUid(uid);
+    if (slot == 0xFF) {
+        out.println("$ERR AP unknown_uid");
+        return true;
+    }
+    const RegisteredModule* m = registry.getModule(slot);
+    if (!moduleIsAudio(m)) {
+        out.println("$ERR AP target_not_audio");
+        return true;
+    }
+    if (m->state != MODULE_REGISTERED) {
+        out.println("$ERR AP target_not_ready");
+        return true;
+    }
+
+    size_t b64Len = strlen(p);
+    while (b64Len > 0 && (p[b64Len - 1] == ' ' || p[b64Len - 1] == '\t')) {
+        b64Len--;
+    }
+    unsigned char decoded[WB_AUDIO_PATCH_MAX_ENCODED];
+    size_t decodedLen = 0;
+    int ret = mbedtls_base64_decode(decoded, sizeof(decoded), &decodedLen,
+                                    (const unsigned char*)p, b64Len);
+    if (ret != 0 || decodedLen != WB_AUDIO_PATCH_ENCODED_LEN) {
+        out.printf("$ERR AP b64_decode ret=%d len=%u\n", ret,
+                   (unsigned)decodedLen);
+        return true;
+    }
+
+    WBAudioPatch patch;
+    if (!wbAudioPatchDecode(decoded, (uint16_t)decodedLen, patch)) {
+        out.println("$ERR AP bad_patch");
+        return true;
+    }
+    if (!provisionAudioPatchForSlot(slot, decoded, (uint16_t)decodedLen,
+                                    patch.configRev)) {
+        out.println("$ERR AP send_failed");
+        return true;
+    }
+
+    out.printf("$OK AP %s rev=%lu bytes=%u\n", uidHex(uid),
+               (unsigned long)patch.configRev, (unsigned)decodedLen);
+    return true;
 }
 
 #if WB_HUB_ENABLE_WIFI_OSC
@@ -1600,6 +1717,7 @@ void handleSerialCommand(const char* cmd) {
     if (strcmp(cmd, "$Q,TOPO")   == 0) { emitTopology();       return; }
     if (strcmp(cmd, "$Q,ECA")    == 0) { emitEcaSnapshot();    return; }
     if (handleLoggerHostCommand(cmd)) return;
+    if (handleAudioPatchHostCommand(cmd)) return;
     if (handleWirelessHostCommand(cmd)) return;
 
     // $Q,FORGET ALL          — wipe entire topology memory + NVS blob

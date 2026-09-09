@@ -30,3 +30,28 @@ Keys (both modes): `t` topology, `s` status, `r` run program, `p` stop,
 
 Dependencies: `pyserial` for `--port`, `websockets` for `--ws`. Both come
 in via the bridge's existing requirements.
+
+## `audio_patch.py`
+
+Reference compiler for the fixed-resource ESP32-C3 audio rack. Values such as
+mix, resonance, depth, sustain, feedback, and gain use normalized `0.0..1.0`
+JSON numbers. Compiling validates the hardware limits and emits the exact
+42-byte `WBAP` profile accepted by the Hub and audio module.
+
+```bash
+# Inspect the normalized result and print a copy/pasteable Hub command.
+python3 frontend/tools/audio_patch.py compile \
+  frontend/tools/audio_patches/subtractive_bass.json --uid C0FFEE01
+
+# Keep the binary artifact for inspection or versioned releases.
+python3 frontend/tools/audio_patch.py compile patch.json \
+  --output patch.wbap --uid C0FFEE01
+
+# Direct update; the bridge must not be holding the serial port.
+python3 frontend/tools/audio_patch.py upload patch.json \
+  --uid C0FFEE01 --port /dev/cu.usbmodemXXXX
+```
+
+Success has two stages: `$OK AP ...` means the Hub accepted and sent the
+profile; `$AP,ACK,<uid>,0,<revision>` means the module validated and persisted
+it. A nonzero ACK status leaves the failure visible to the upload command.

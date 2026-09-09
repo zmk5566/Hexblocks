@@ -1,0 +1,35 @@
+{
+  "config_rev": 1,
+  "envelope_enabled": true,
+  "oscillators": {
+    "a": "saw",
+    "b": "square",
+    "mix": 0.32,
+    "noise": 0.02,
+    "b_octave": -1,
+    "b_detune_cents": 7
+  },
+  "filter": {
+    "mode": "lowpass",
+    "cutoff_hz": 1350,
+    "resonance": 0.38
+  },
+  "lfo": {
+    "wave": "triangle",
+    "targets": ["filter"],
+    "rate_hz": 0.35,
+    "depth": 0.18
+  },
+  "envelope": {
+    "attack_ms": 8,
+    "decay_ms": 180,
+    "sustain": 0.68,
+    "release_ms": 280
+  },
+  "delay": {
+    "time_ms": 0,
+    "feedback": 0.0,
+    "mix": 0.0
+  },
+  "master_gain": 0.72
+}

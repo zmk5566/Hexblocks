@@ -90,9 +90,7 @@ bool wbWirelessConfigEncode(const WBWirelessConfig& cfg, uint8_t* buffer,
 bool wbWirelessConfigDecode(const uint8_t* data, uint16_t len,
                             WBWirelessConfig& cfg) {
     if (!data || len < 20) return false;
-    if (data[0] != 'W' || data[1] != 'B' || data[2] != 'W' || data[3] != 'F') {
-        return false;
-    }
+    if (!wbWirelessConfigIsPayload(data, len)) return false;
     if (data[4] != WB_WIFI_PROFILE_VERSION) return false;
     uint32_t gotCrc = readU32LE(&data[len - 4]);
     uint32_t wantCrc = wbFnv1a32(data, len - 4);
@@ -122,6 +120,12 @@ bool wbWirelessConfigDecode(const uint8_t* data, uint16_t len,
     memcpy(out.token, &data[off], tokenLen); out.token[tokenLen] = '\0';
     cfg = out;
     return true;
+}
+
+bool wbWirelessConfigIsPayload(const uint8_t* data, uint16_t len) {
+    return data && len >= 4 &&
+           data[0] == 'W' && data[1] == 'B' &&
+           data[2] == 'W' && data[3] == 'F';
 }
 
 bool wbWirelessConfigSave(const WBWirelessConfig& cfg, const char* nsName) {
@@ -310,7 +314,8 @@ WBWirelessModule::WBWirelessModule(WBModule& module,
       _udpStarted(false),
       _helloAcked(false),
       _actuatorCb(nullptr),
-      _topicCb(nullptr) {
+      _topicCb(nullptr),
+      _systemConfigCb(nullptr) {
     wbWirelessConfigDefaults(_config);
     _instance = this;
 }
@@ -332,6 +337,10 @@ void WBWirelessModule::onActuatorCommand(WBWirelessActuatorCallback cb) {
 void WBWirelessModule::onTopic(WBWirelessTopicCallback cb) {
     _topicCb = cb;
     _protocol.onTopic(&WBWirelessModule::_topicThunk);
+}
+
+void WBWirelessModule::onSystemConfig(WBWirelessSystemConfigCallback cb) {
+    _systemConfigCb = cb;
 }
 
 bool WBWirelessModule::wifiReady() const {
@@ -400,6 +409,14 @@ bool WBWirelessModule::sendSensorChannel(uint8_t channelId, float value) {
 
 void WBWirelessModule::handleSysConfig(const uint8_t* payload, uint16_t payloadLen,
                                        uint8_t sessionId) {
+    if (!wbWirelessConfigIsPayload(payload, payloadLen)) {
+        if (_systemConfigCb) {
+            _systemConfigCb(payload, payloadLen, sessionId);
+        } else {
+            _protocol.sendSysConfigAck(12, sessionId);
+        }
+        return;
+    }
     WBWirelessConfig next;
     if (!wbWirelessConfigDecode(payload, payloadLen, next)) {
         _protocol.sendSysConfigAck(10, sessionId);

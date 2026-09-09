@@ -30,6 +30,7 @@ uint32_t wbFnv1a32(const uint8_t* data, size_t len);
 void wbWirelessConfigDefaults(WBWirelessConfig& cfg);
 bool wbWirelessConfigEncode(const WBWirelessConfig& cfg, uint8_t* buffer,
                             uint16_t maxLen, uint16_t& outLen);
+bool wbWirelessConfigIsPayload(const uint8_t* data, uint16_t len);
 bool wbWirelessConfigDecode(const uint8_t* data, uint16_t len,
                             WBWirelessConfig& cfg);
 bool wbWirelessConfigSave(const WBWirelessConfig& cfg,
@@ -78,6 +79,9 @@ bool wbOscAddBlob(WBOscEncoder& enc, const uint8_t* value, uint16_t len);
 typedef void (*WBWirelessActuatorCallback)(uint8_t cmd, const uint8_t* params,
                                            uint8_t paramLen);
 typedef void (*WBWirelessTopicCallback)(uint8_t channelId, bool enable);
+typedef void (*WBWirelessSystemConfigCallback)(const uint8_t* payload,
+                                                uint16_t payloadLen,
+                                                uint8_t sessionId);
 
 class WBWirelessModule {
 public:
@@ -92,6 +96,9 @@ public:
 
     void onActuatorCommand(WBWirelessActuatorCallback cb);
     void onTopic(WBWirelessTopicCallback cb);
+    // SYS_CONFIG is shared by transport profiles and module-specific compact
+    // profiles. Non-WBWF payloads are delegated to this callback.
+    void onSystemConfig(WBWirelessSystemConfigCallback cb);
 
     bool wifiReady() const;
     bool runtimeReady() const;
@@ -142,6 +149,7 @@ private:
     bool _helloAcked;
     WBWirelessActuatorCallback _actuatorCb;
     WBWirelessTopicCallback _topicCb;
+    WBWirelessSystemConfigCallback _systemConfigCb;
 };
 
 #endif

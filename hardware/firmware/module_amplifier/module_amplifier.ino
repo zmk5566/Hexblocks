@@ -1,12 +1,14 @@
 /*
- * WearBlocks Module — Audio Synth (MAX98357A I2S amp), v2
+ * WearBlocks Module — Fixed-Resource Audio Rack (MAX98357A I2S amp), v3
  * Target: ESP32-C3-MINI-1
  * Actuator: MAX98357A on I2S (BCLK=GPIO5, LRC=GPIO3, DIN=GPIO4)
  *
  * Pin note: BCLK moved off GPIO 2 — GPIO 2 is an ESP32-C3 strapping pin and
  * the audio path was silent when BCLK lived there. GPIO 5 is clean.
  *
- * Capability: actuator/audio_synth, axes=2 (freq, amp).
+ * Capability: actuator/audio_synth, axes=2 (freq, amp), plus a compact WBAP
+ * patch delivered over chunked SYS_CONFIG. The patch changes the built-in
+ * oscillator/filter/LFO/delay rack without reflashing firmware.
  * Commands:
  *   ACT_AUDIO_SET_TONE (0x30) — freq_lo, freq_hi, amp, optional duration_u32_be
  *   ACT_AUDIO_STOP    (0x31) — 0 params
@@ -23,17 +25,16 @@
 #include <WearBlocksModule.h>
 #include <WearBlocksWireless.h>
 #include <WearBlocksECA.h>
-#include <AudioTools.h>
+#include <WearBlocksAudio.h>
+#include <ESP_I2S.h>
+#include <Preferences.h>
+#include "AudioRack.h"
 
 #define CAN_TX   6
 #define CAN_RX   7
 #define I2S_BCLK 5
 #define I2S_LRC  3
 #define I2S_DIN  4
-
-#define AUDIO_SAMPLE_RATE 22050
-#define AUDIO_BITS        16
-#define AUDIO_AMP_MAX     20000   // peak int16 amplitude when host sends amp=255
 
 #ifndef CHILD_DETECT
 #define CHILD_DETECT 1
@@ -55,12 +56,13 @@ WearBlocksDescriptor descriptor;
 WBModule             module(can, protocol, descriptor);
 WBWirelessModule     wireless(module, protocol, descriptor);
 
-static const char FW_VERSION[] = "2.0";
+static const char FW_VERSION[] = "3.0";
 
-SineWaveGenerator<int16_t>      sine(0);
-GeneratedSoundStream<int16_t>   src(sine);
-I2SStream                       i2s;
-StreamCopy                      copier(i2s, src);
+I2SClass i2s;
+AudioRack audioRack;
+int16_t audioBlock[AudioRack::BLOCK_FRAMES * 2];
+uint32_t audioShortWrites = 0;
+uint32_t lastAudioHealthLog = 0;
 
 // ── Child-presence debounce ──────────────────────────────────
 #if CHILD_DETECT
@@ -133,7 +135,14 @@ void setupDescriptor() {
 
     descriptor.numAffordances = 2;
     strlcpy(descriptor.affordances[0], "audio_feedback", 24);
-    strlcpy(descriptor.affordances[1], "tone_generator", 24);
+    strlcpy(descriptor.affordances[1], "patchable_synth", 24);
+
+    descriptor.numConfigFields = 1;
+    WBConfigField& patch = descriptor.configFields[0];
+    strlcpy(patch.key, "audio_patch", sizeof(patch.key));
+    strlcpy(patch.type, "bytes", sizeof(patch.type));
+    strlcpy(patch.defaultValue, "built_in", sizeof(patch.defaultValue));
+    strlcpy(patch.label, "WBAP subtractive synth patch", sizeof(patch.label));
 
     descriptor.power.voltage = 3.3f;
     descriptor.power.currentTypical = 50.0f;
@@ -149,11 +158,9 @@ void setupDescriptor() {
 }
 
 // ── Actuator callback ────────────────────────────────────────
-// Deadband: SineWaveGenerator::setFrequency resets phase whenever the new
-// freq != the cached one. ECA streams SET_TONE at every tick with float
-// jitter (e.g. 400.001 vs 400.002), so naively forwarding every call resets
-// the waveform back to sin(0) on each frame → audible silence. Only update
-// the generator when the value moves by more than the deadband.
+// ECA can stream SET_TONE at every tick with small float-to-integer jitter.
+// Suppress insignificant control churn; AudioRack smooths accepted changes
+// without resetting oscillator phase.
 static float    g_lastFreq = -1.0f;
 static int16_t  g_lastAmp  = -1;
 static const float FREQ_DEADBAND_HZ = 1.0f;
@@ -163,7 +170,7 @@ static uint32_t g_toneUntil = 0;
 void stopTone() {
     g_toneTimed = false;
     if (g_lastAmp != 0) {
-        sine.setAmplitude(0);
+        audioRack.hardStop();
         g_lastAmp = 0;
         Serial.println("[AMP] STOP");
     }
@@ -178,15 +185,14 @@ void onActuatorCmd(uint8_t cmd, const uint8_t* p, uint8_t pLen) {
         uint16_t freq = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
         uint8_t  amp  = p[2];
         if (fabsf((float)freq - g_lastFreq) >= FREQ_DEADBAND_HZ) {
-            sine.setFrequency((float)freq);
             g_lastFreq = (float)freq;
             Serial.printf("[AMP] freq=%u\n", freq);
         }
         if (amp != g_lastAmp) {
-            sine.setAmplitude((float)amp / 255.0f * AUDIO_AMP_MAX);
             g_lastAmp = amp;
             Serial.printf("[AMP] amp=%u\n", amp);
         }
+        audioRack.setTone(g_lastFreq >= 0.0f ? g_lastFreq : (float)freq, amp);
         if (pLen >= 7) {
             uint32_t duration = ((uint32_t)p[3] << 24) |
                                 ((uint32_t)p[4] << 16) |
@@ -205,6 +211,55 @@ void onActuatorCmd(uint8_t cmd, const uint8_t* p, uint8_t pLen) {
         return;
     }
     Serial.printf("[AMP] unknown cmd=0x%02X (ignored)\n", cmd);
+}
+
+bool saveAudioPatch(const uint8_t* payload, uint16_t payloadLen) {
+    Preferences prefs;
+    if (!prefs.begin("wbaudio", false)) return false;
+    size_t wrote = prefs.putBytes("patch", payload, payloadLen);
+    size_t wroteLen = prefs.putUShort("patch_len", payloadLen);
+    prefs.end();
+    return wrote == payloadLen && wroteLen == sizeof(uint16_t);
+}
+
+bool loadAudioPatch() {
+    Preferences prefs;
+    if (!prefs.begin("wbaudio", true)) return false;
+    uint16_t len = prefs.getUShort("patch_len", 0);
+    if (len != WB_AUDIO_PATCH_ENCODED_LEN) {
+        prefs.end();
+        return false;
+    }
+    uint8_t payload[WB_AUDIO_PATCH_MAX_ENCODED];
+    size_t got = prefs.getBytes("patch", payload, len);
+    prefs.end();
+    if (got != len) return false;
+    WBAudioPatch patch;
+    if (!wbAudioPatchDecode(payload, len, patch)) return false;
+    audioRack.setPatch(patch);
+    Serial.printf("[AMP] restored patch rev=%lu\n",
+                  (unsigned long)patch.configRev);
+    return true;
+}
+
+void onSystemConfig(const uint8_t* payload, uint16_t payloadLen,
+                    uint8_t sessionId) {
+    WBAudioPatch patch;
+    if (!wbAudioPatchDecode(payload, payloadLen, patch)) {
+        protocol.sendSysConfigAck(30, sessionId);
+        Serial.printf("[AMP] rejected SYS_CONFIG len=%u\n", (unsigned)payloadLen);
+        return;
+    }
+
+    // The callback runs between render blocks on this single-core module, so
+    // the active struct is replaced atomically from the audio loop's view.
+    audioRack.setPatch(patch);
+    bool saved = saveAudioPatch(payload, payloadLen);
+    protocol.sendSysConfigAck(saved ? 0 : 31, sessionId);
+    Serial.printf("[AMP] patch rev=%lu saved=%d wave=%u/%u filter=%u delay=%ums\n",
+                  (unsigned long)patch.configRev, saved ? 1 : 0,
+                  (unsigned)patch.oscAWave, (unsigned)patch.oscBWave,
+                  (unsigned)patch.filterMode, (unsigned)patch.delayMs);
 }
 
 void onRegistered(uint8_t slot, bool descriptorCached) {
@@ -235,19 +290,19 @@ void setup() {
     delay(20);
 #endif
 
-    AudioInfo info(AUDIO_SAMPLE_RATE, 1, AUDIO_BITS);
-    auto i2sCfg = i2s.defaultConfig(TX_MODE);
-    i2sCfg.copyFrom(info);
-    i2sCfg.pin_bck  = I2S_BCLK;
-    i2sCfg.pin_ws   = I2S_LRC;
-    i2sCfg.pin_data = I2S_DIN;
-    if (!i2s.begin(i2sCfg)) {
+    audioRack.begin();
+    if (!loadAudioPatch()) {
+        Serial.println("[AMP] using built-in default patch");
+    }
+
+    i2s.setPins(I2S_BCLK, I2S_LRC, I2S_DIN);
+    if (!i2s.begin(I2S_MODE_STD, AudioRack::SAMPLE_RATE,
+                   I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO)) {
         Serial.println("[AMP] I2S init FAILED!");
     }
-    sine.begin(info, 0.0f);
-    src.begin(info);
 
     setupDescriptor();
+    wireless.onSystemConfig(onSystemConfig);
     wireless.begin();
     module.start();
     Serial.printf("[AMP] fwVersion=%s fwHash=%04X\n", FW_VERSION, module.fwHash());
@@ -260,9 +315,19 @@ void loop() {
     module.tick();
     wireless.tick();
     if (g_toneTimed && (int32_t)(millis() - g_toneUntil) >= 0) stopTone();
-    copier.copy();
+    audioRack.renderStereo(audioBlock, AudioRack::BLOCK_FRAMES);
+    size_t expected = sizeof(audioBlock);
+    size_t wrote = i2s.write((const uint8_t*)audioBlock, expected);
+    if (wrote != expected) audioShortWrites++;
 #if CHILD_DETECT
     scanChildren();
 #endif
     protocol.sendHeartbeat();
+    uint32_t now = millis();
+    if (audioShortWrites > 0 && now - lastAudioHealthLog >= 1000) {
+        lastAudioHealthLog = now;
+        Serial.printf("[AMP] I2S short writes=%lu last=%u/%u\n",
+                      (unsigned long)audioShortWrites, (unsigned)wrote,
+                      (unsigned)expected);
+    }
 }

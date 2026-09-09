@@ -1,0 +1,42 @@
+Row Type,Category,Item,Specification or Assumption,Required Qty,Purchase Qty,Unit,Unit Price CNY,School Stencil Self-Assembly CNY,JLC Economic SMT CNY,Cost Treatment,Confidence,Source,Notes
+Information,Scope,Budget configuration,15 kits = 15 hubs + one of each six heterogeneous module types per kit,15,15,kit,,,,Information,High,../docs/bom.md,Total is 15 hubs and 90 modules; module types are IMU/light/knob/RGB LED/vibration/audio
+Information,Manufacturing status,Current production gate,NO-GO: prototype procurement and process-planning estimate only,,,,,,,Information,High,../../schematics/schematics.kicad_pcb | ../../schematics/schematics.kicad_sch,Current CAD files are empty placeholders; no Gerber/CPL/production BOM; not a binding quote
+Information,Version,Budget date,2026-07-24,,,,,,,Information,High,,All dynamic prices are controlled by the order page and engineering review
+Assumption,Common,FX conversion,Used only to convert the repository USD prototype BOM to CNY,1,1,USD,7.20,,,Input,Medium,../docs/bom.md,Not a live FX quote; replace before procurement
+Assumption,Common,Electronics and mechanical spare rate,General parts use 10% spares with package rounding,10,10,%,,,,Input,Medium,,Pogo pins and magnets use the documented upper bound before rounding
+Assumption,Common,Uncertainty contingency,Add 15% to cash subtotal because manufacturing files are not frozen,15,15,%,,,,Input,Medium,,Covers review adders/rework/price variance; does not replace a formal quote
+Cost,Core electronics,MCU,ESP32-C3-MINI-1-N4,105,116,pcs,10.80,1252.80,1252.80,Cash,Medium,../docs/bom.md,Unit price = repository USD 1.50 × 7.20; quantity includes 10% spares
+Cost,Core electronics,CAN transceiver,SN65HVD230DR,105,116,pcs,3.60,417.60,417.60,Cash,Medium,../docs/bom.md,Unit price = repository USD 0.50 × 7.20; quantity includes 10% spares
+Cost,Hub electronics,USB-C connector,Generic 16-pin SMD with exact part number not frozen,15,17,pcs,2.16,36.72,36.72,Cash,Low,../docs/bom.md,Unit price = repository USD 0.30 × 7.20
+Cost,Hub electronics,Charger module,TP4056 module,15,17,pcs,3.60,61.20,61.20,Cash,Low,../docs/bom.md,Architecture may change to a bare IC in a custom PCBA
+Cost,Hub electronics,3.3V regulator,AMS1117-3.3 is provisional and conflicts with the TLV75901 draft,15,17,pcs,0.72,12.24,12.24,Cash,Low,../docs/bom.md | ../pcb/hub/elec/src/ti-tlv75901/ti-tlv75901.ato,The production BOM must choose one
+Cost,Hub power,1000mAh LiPo,3.7V with JST,15,17,pcs,21.60,367.20,367.20,Cash,Medium,../docs/bom.md,Unit price = repository USD 3.00 × 7.20
+Cost,Connection mechanics,P75-B1 pogo pins,Hub 36 plus the module upper bound of 18,2160,2400,pcs,0.72,1728.00,1728.00,Cash,Low,../docs/bom.md,Face topology is not frozen; do not pre-purchase from this estimate
+Cost,Connection mechanics,N52 magnets,6mm×2mm using hub 12 plus module upper bound of 6,720,800,pcs,0.72,576.00,576.00,Cash,Low,../docs/bom.md,Mechanical dimensions and polarity fixture require verification
+Cost,Enclosures,Hub PLA enclosure,In-school 3D-printing material estimate,15,17,pcs,3.60,61.20,61.20,Cash,Medium,../docs/bom.md | ../../openscad-model/hex_module.scad,Printer depreciation excluded
+Cost,Enclosures,Module PLA enclosure,In-school 3D-printing material estimate,90,99,pcs,3.60,356.40,356.40,Cash,Medium,../docs/bom.md | ../../openscad-model/hex_module.scad,Printer depreciation excluded
+Cost,Misc electronics,Hub passives/LEDs/headers,Repository lump-sum estimate,15,17,set,7.20,122.40,122.40,Cash,Low,../docs/bom.md,Production BOM must expand CC/ESD/BOOT/EN/decoupling/CAN termination
+Cost,Misc electronics,Module passives/headers,Repository lump-sum estimate,90,99,set,3.60,356.40,356.40,Cash,Low,../docs/bom.md,Production BOM must expand all references and packages
+Cost,Module add-on,IMU,MPU6050 GY-521,15,17,pcs,10.80,183.60,183.60,Cash,Medium,../docs/bom.md,Unit price = repository USD 1.50 × 7.20
+Cost,Module add-on,RGB LED,WS2812B 8-pixel ring,15,17,pcs,18.00,306.00,306.00,Cash,Medium,../docs/bom.md,Unit price = repository USD 2.50 × 7.20
+Cost,Module add-on,Vibration,DRV2605L breakout + ERM motor,15,17,set,28.80,489.60,489.60,Cash,Medium,../docs/bom.md,Unit price = repository USD 4.00 × 7.20
+Cost,Module add-on,Audio,MAX98357A breakout + 8ohm speaker,15,17,set,25.20,428.40,428.40,Cash,Medium,../docs/bom.md,Unit price = repository USD 3.50 × 7.20
+Cost,Module add-on,Ambient light,GL5528 LDR + 10kohm divider,15,17,set,3.60,61.20,61.20,Cash,Medium,../docs/bom.md,Unit price = repository USD 0.50 × 7.20
+Cost,Module add-on,Rotary knob,WH148 B100K,15,17,pcs,5.76,97.92,97.92,Cash,Medium,../docs/bom.md,Unit price = repository USD 0.80 × 7.20
+Cost,Bare PCB,Hub PCB,Planning placeholder for 2-layer board smaller than 10cm×10cm,15,17,pcs,8.00,136.00,136.00,Cash,Low,https://www.jlc.com/ | ../docs/bom.md,No Gerber or board outline so this is not an online quote
+Cost,Bare PCB,Module PCB,Planning placeholder for 17 pcs of each of six designs,90,102,pcs,5.00,510.00,510.00,Cash,Low,https://www.jlc.com/ | ../docs/bom.md,Six designs total; irregular outlines and panel review may add cost
+Cost,Process,School frameless stencils,28cm×38cm with two sheets for seven designs,2,2,sheet,55.00,110.00,0.00,Cash,Medium,https://www.jlc.com/portal/smtLaserSteelNet.html,The paired JLC SMT stencil stays at the factory
+Cost,Process,School assembly consumables,Solder paste/flux/IPA/wipes/desoldering braid/cleaning,1,1,batch,350.00,350.00,0.00,Cash,Low,,Batch planning estimate
+Cost,Process,SMT post-assembly consumables,Consumables for school installation of pogo/magnets/enclosures/breakouts,1,1,batch,150.00,0.00,150.00,Cash,Low,,The JLC route is still not a turnkey finished product
+Cost,JLC SMT,Economic SMT setup fee,Seven design orders × CNY 50,7,7,order,50.00,0.00,350.00,Cash,Medium,https://www.jlc.com/portal/server_guide_42886.html,Whether designs can be combined is controlled by the online quote
+Cost,JLC SMT,SMT joint charge,Placeholder of hub 130 joints ×15 + module 90 joints ×90,10050,10050,joint,0.01,0.00,100.50,Cash,Low,https://www.jlc.com/portal/server_guide_42886.html,Joint count is provisional because production BOM/CPL do not exist
+Cost,JLC SMT,Extended-library loading,Placeholder of 16 feeder-loading events across orders × CNY 20,16,16,event,20.00,0.00,320.00,Cash,Low,https://www.jlc.com/portal/newV2/smt.jsp,Final value comes from BOM matching
+Cost,Quality,Programming and test fixture,Current-limited supply/cables/pogo fixture/spare test pieces,1,1,batch,500.00,500.00,500.00,Cash,Low,,Reduce if suitable equipment already exists
+Cost,Logistics,Domestic shipping and packaging,Combined placeholder for PCB/components/batteries/stencils or PCBA,1,1,batch,350.00,350.00,350.00,Cash,Low,,Tax invoice/remote address/battery shipping may change this
+Summary,Cash,Cash subtotal before contingency,Common materials + route-specific manufacturing,,,,,8870.88,9331.38,Output,Medium,,Cash procurement and manufacturing subtotal
+Summary,Cash,15% uncertainty contingency,Cash subtotal before contingency ×15%,15,15,%,,1330.63,1399.71,Output,Medium,,A higher contingency is used because production files are not frozen
+Summary,Cash,Recommended cash budget,Cash subtotal before contingency + 15% contingency,,,,,10201.51,10731.09,Output,Medium,,School-payment view
+Summary,Unit,Cash budget per kit,Recommended cash budget ÷15,15,15,kit,,680.10,715.41,Output,Medium,,One kit = one hub + six module types
+Information,Boundary,Meaning of JLC direct,Economic SMT places core SMD only; school still handles breakouts/pogo/magnets/battery/enclosures,,,,,,,Information,High,https://www.jlc.com/portal/server_guide_30669.html,A true turnkey product requires production-ready PCBA redesign and a separate assembly quote
+Information,Excluded,Possible formal-quote adders,Tax invoice/coupon/expedite/surface finish/X-ray/manual BOM matching/consigned parts/waste disposal,,,,,,,Information,High,https://www.jlc.com/portal/q6i53841.html,Confirm every item before ordering
+Information,Next step,Obtain a binding quote,Freeze architecture and generate Gerber + production BOM + CPL then upload for online pricing,,,,,,,Information,High,https://www.jlc.com/,Save quote date/file hashes/process/lead time/delivery address
